@@ -93,7 +93,8 @@ class DataProcessor(object):
             lines = []
             for line in reader:
                 if sys.version_info[0] == 2:
-                    line = list(unicode(cell, 'utf-8') for cell in line)
+                    # line = list(unicode(cell, 'utf-8') for cell in line)
+                    line = list(str(cell) for cell in line)
                 lines.append(line)
             return lines
 
