@@ -17,7 +17,7 @@ from torch import nn
 from torch.nn import CrossEntropyLoss, MSELoss
 from tag_model.modeling import TagEmebedding, TagPooler
 from .file_utils import cached_path
-from allennlp.nn.util import masked_softmax
+# from allennlp.nn.util import masked_softmax
 logger = logging.getLogger(__name__)
 
 PRETRAINED_MODEL_ARCHIVE_MAP = {

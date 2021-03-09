@@ -29,7 +29,9 @@ logging.basicConfig(format = '%(asctime)s - %(levelname)s - %(name)s -   %(messa
                     datefmt = '%m/%d/%Y %H:%M:%S',
                     level = logging.INFO)
 logger = logging.getLogger(__name__)
-#csv.field_size_limit(sys.maxsize)
+# csv.field_size_limit(sys.maxsize)
+# csv.field_size_limit(500 * 1024 * 1024)
+
 import sklearn.metrics as mtc
 class InputExample(object):
     """A single training/test example for simple sequence classification."""
@@ -89,7 +91,7 @@ class DataProcessor(object):
     def _read_tsv(cls, input_file, quotechar=None):
         """Reads a tab separated value file."""
         with open(input_file, "r", encoding='utf-8') as f:
-            reader = csv.reader(f, delimiter="\t", quotechar=quotechar)
+            reader = csv.reader(f, delimiter="\t", quotechar="'")
             lines = []
             for line in reader:
                 if sys.version_info[0] == 2:
@@ -111,7 +113,7 @@ class ColaProcessor(DataProcessor):
         self._read_tsv(os.path.join(data_dir, "dev.tsv_tag")), "dev")
 
   def get_test_examples(self, data_dir):
-    """See base class."""
+    """TODO bug See base class."""
     return self._create_examples(
         self._read_tsv(os.path.join(data_dir, "test.tsv_tag")), "test")
 
@@ -124,15 +126,15 @@ class ColaProcessor(DataProcessor):
     examples = []
     for (i, line) in enumerate(lines):
       # Only the test set has a header
-      if set_type == "test" and i == 0:
-        continue
+    #   if set_type == "test" and i == 0:
+        # continue
       guid = "%s-%s" % (set_type, i)
-      if set_type == "test":
-        text_a = line[-1]
-        label = "0"
-      else:
-        text_a = line[-2]
-        label = line[-1]
+    #   if set_type == "test":
+        # text_a = line[-2]  # TODO bug, modified -1 -> -2
+        # label = "0"
+    #   else:
+      text_a = line[-2]
+      label = line[-1]
       examples.append(
           InputExample(guid=guid, text_a=text_a, text_b=None, label=label))
     return examples
@@ -496,6 +498,8 @@ def convert_examples_to_features(examples, label_list, max_seq_length, tokenizer
         tokens_b = []
         tok_to_orig_index_a = []  # subword_token_index -> org_word_index
         tag_sequence = get_tags(srl_predictor, example.text_a, tag_vocab)
+        if not tag_sequence:
+            continue
         token_tag_sequence_a = QueryTagSequence(tag_sequence[0], tag_sequence[1])
         tokens_a_org = tag_sequence[0]
         if len(tag_sequence[1])> max_aspect:
@@ -642,6 +646,8 @@ def transform_tag_features(max_num_aspect, features, tag_tokenizer, max_seq_leng
                 input_tag_id = query_tag_ids
                 while len(input_tag_id) < max_seq_length:
                     input_tag_id.append(0)
+                if len(input_tag_id) != len(example.input_ids):
+                    print("Error")
                 assert len(input_tag_id) == len(example.input_ids)
                 input_tag_ids.append(input_tag_id)
                 # construct input doc tag ids with same length as input ids
@@ -1087,6 +1093,101 @@ def main():
                         logger.info("Epoch: %s,  %s = %s", str(epoch), key, str(result[key]))
                         writer.write("Epoch: %s, %s = %s\n" % (str(epoch), key, str(result[key])))
             logger.info("best epoch: %s, result:  %s", str(best_epoch), str(best_result))
+    if args.do_test:
+        for epoch in trange(int(args.num_train_epochs), desc="Epoch"):
+            eval_examples = processor.get_test_examples(args.data_dir)
+            eval_features = convert_examples_to_features(
+                eval_examples, label_list, args.max_seq_length, tokenizer, srl_predictor=srl_predictor)
+            eval_features = transform_tag_features(args.max_num_aspect, eval_features, tag_tokenizer,
+                                                   args.max_seq_length)
+
+            logger.info("***** Running evaluation *****")
+            logger.info("  Num examples = %d", len(eval_examples))
+            logger.info("  Batch size = %d", args.eval_batch_size)
+            all_input_ids = torch.tensor([f.input_ids for f in eval_features], dtype=torch.long)
+            all_input_mask = torch.tensor([f.input_mask for f in eval_features], dtype=torch.long)
+            all_segment_ids = torch.tensor([f.segment_ids for f in eval_features], dtype=torch.long)
+            all_label_ids = torch.tensor([f.label_id for f in eval_features], dtype=torch.long)
+            all_start_end_idx = torch.tensor([f.orig_to_token_split_idx for f in eval_features], dtype=torch.long)
+            all_input_tag_ids = torch.tensor([f.input_tag_ids for f in eval_features], dtype=torch.long)
+            eval_data = TensorDataset(all_input_ids, all_input_mask, all_segment_ids, all_start_end_idx,
+                                      all_input_tag_ids, all_label_ids)
+            # Run prediction for full data
+            eval_sampler = SequentialSampler(eval_data)
+            eval_dataloader = DataLoader(eval_data, sampler=eval_sampler, batch_size=args.eval_batch_size)
+
+            # epoch = 1
+            output_model_file = os.path.join(args.output_dir, str(epoch) + "_pytorch_model.bin")
+            model_state_dict = torch.load(output_model_file)
+            predict_model = BertForSequenceClassificationTag.from_pretrained(args.bert_model,
+                                                                             state_dict=model_state_dict,
+                                                                             num_labels=num_labels,
+                                                                             tag_config=tag_config)
+            predict_model.to(device)
+            predict_model.eval()
+            eval_loss, eval_accuracy = 0, 0
+            nb_eval_steps, nb_eval_examples = 0, 0
+            total_TP, total_FP, total_FN, total_TN = 0, 0, 0, 0
+            for input_ids, input_mask, segment_ids, start_end_idx, input_tag_ids, label_ids in tqdm(
+                    eval_dataloader, desc="Evaluating"):
+                input_ids = input_ids.to(device)
+                input_mask = input_mask.to(device)
+                segment_ids = segment_ids.to(device)
+                label_ids = label_ids.to(device)
+                start_end_idx = start_end_idx.to(device)
+                input_tag_ids = input_tag_ids.to(device)
+                with torch.no_grad():
+                    tmp_eval_loss = predict_model(input_ids, segment_ids, input_mask, start_end_idx, input_tag_ids,
+                                                  label_ids)
+                    logits = predict_model(input_ids, segment_ids, input_mask, start_end_idx, input_tag_ids,
+                                           None)
+                logits = logits.detach().cpu().numpy()
+                label_ids = label_ids.to('cpu').numpy()
+                tmp_eval_accuracy = accuracy(logits, label_ids)
+
+                eval_loss += tmp_eval_loss.mean().item()
+                eval_accuracy += tmp_eval_accuracy
+
+                nb_eval_examples += input_ids.size(0)
+                nb_eval_steps += 1
+
+            eval_loss = eval_loss / nb_eval_steps
+            eval_accuracy = eval_accuracy / nb_eval_examples
+            if eval_accuracy > best_result:
+                best_epoch = epoch
+                best_result = eval_accuracy
+            loss = tr_loss / nb_tr_steps if args.do_train else None
+            result = {'eval_loss': eval_loss,
+                      'eval_accuracy': eval_accuracy,
+                      'global_step': global_step,
+                      'loss': loss}
+            if task_name == "cola":
+                # TODO:  eval_mcc = mcc(total_pred, total_labels)
+                # result["eval_mcc"] = eval_mcc
+                pass
+            elif task_name == "mrpc" or task_name == "qqp":  # need F1 score
+                if total_TP + total_FP == 0:
+                    P = 0
+                else:
+                    P = total_TP / (total_TP + total_FP)
+                if total_TP + total_FN == 0:
+                    R = 0
+                else:
+                    R = total_TP / (total_TP + total_FN)
+                if P + R == 0:
+                    F1 = 0
+                else:
+                    F1 = 2.00 * P * R / (P + R)
+                result["Precision"] = P
+                result["Recall"] = R
+                result["F1 score"] = F1
+            output_eval_file = os.path.join(args.output_dir, "dev_results.txt")
+            with open(output_eval_file, "a") as writer:
+                logger.info("***** Eval results *****")
+                for key in sorted(result.keys()):
+                    logger.info("Epoch: %s,  %s = %s", str(epoch), key, str(result[key]))
+                    writer.write("Epoch: %s, %s = %s\n" % (str(epoch), key, str(result[key])))
+            logger.info("best epoch: %s, result:  %s", str(best_epoch), str(best_result))
 
     if args.do_eval:
         #for epoch in ["1"]:
@@ -1158,8 +1259,9 @@ def main():
                       'global_step': global_step,
                       'loss': loss}
             if task_name == "cola":
-                eval_mcc = mcc(total_pred, total_labels)
-                result["eval_mcc"] = eval_mcc
+                # TODO:  eval_mcc = mcc(total_pred, total_labels)
+                # result["eval_mcc"] = eval_mcc
+                pass
             elif task_name == "mrpc" or task_name == "qqp":  # need F1 score
                 if total_TP + total_FP == 0:
                     P = 0
