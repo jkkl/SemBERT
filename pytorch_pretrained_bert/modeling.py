@@ -954,10 +954,10 @@ class BertForSequenceClassificationTag(BertPreTrainedModel):
             self.classifier = nn.Linear(hidden_size, num_labels)
         self.apply(self.init_bert_weights)
 
-    def forward(self, input_ids, token_type_ids=None, attention_mask=None, start_end_idx=None, input_tag_ids=None, labels=None):
+    def forward(self, input_ids, token_type_ids=None, attention_mask=None, start_end_idx=None, input_tag_ids=None, labels=None, no_cuda=False):
         sequence_output, _ = self.bert(input_ids, token_type_ids, attention_mask, output_all_encoded_layers=False)
         # no_cuda = False
-        no_cuda = True
+        # no_cuda = True
         batch_size, sub_seq_len, dim = sequence_output.size()
         # sequence_output = sequence_output.unsqueeze(1)
         start_end_idx = start_end_idx  # batch * seq_len * (start, end)
@@ -1020,7 +1020,7 @@ class BertForSequenceClassificationTag(BertPreTrainedModel):
 
         else:
             sequence_output = bert_output
-
+        # ? cnn完，tag linear完，还用cls？ tag 做了线性变换后，也是用cls，这样靠谱吗？
         first_token_tensor = sequence_output[:, 0]
         pooled_output = self.pool(first_token_tensor)
         pooled_output = self.activation(pooled_output)

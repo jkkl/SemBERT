@@ -30,7 +30,7 @@ class LayerNorm(nn.Module):
         self.variance_epsilon = eps
 
     def forward(self, x):
-        u = x.mean(-1, keepdim=True)
+        u = x.mean(-1, keepdim=True) # 返回所有元素的平均值
         s = (x - u).pow(2).mean(-1, keepdim=True)
         x = (x - u) / torch.sqrt(s + self.variance_epsilon)
         return self.weight * x + self.bias

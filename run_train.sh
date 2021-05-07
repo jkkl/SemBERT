@@ -1,14 +1,15 @@
 CUDA_VISIBLE_DEVICES=1 python run_intention_classifier.py \
---data_dir data/intention2_v2/ \
---task_name cola \
+--task_desc intention170_small_srl_epoch20 \
+--data_dir data/Intention170_binary/ \
+--task_name intention \
 --train_batch_size 32 \
 --max_seq_length 32 \
 --bert_model bert-base-chinese \
 --learning_rate 2e-5 \
---num_train_epochs 5 \
+--num_train_epochs 20 \
 --do_train \
 --do_eval \
 --do_test \
 --do_lower_case \
 --max_num_aspect 3 \
---output_dir glue/intention_model_dir
+--output_dir saved_models/intention170_smal_srl_epoch20

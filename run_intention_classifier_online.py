@@ -9,7 +9,7 @@ import logging
 import os
 import random
 import sys
-
+import datetime
 import numpy as np
 import torch
 import pickle
@@ -129,11 +129,10 @@ class IntentionProcessor(DataProcessor):
   def get_test_examples_online(self, query):
     """TODO bug See base class."""
     input_format = query_format(query)
-
-
+    input_format_list = input_format.strip().split('\t')
 
     return self._create_examples(
-        [input_format], "test")
+        [input_format_list], "test")
 
   def get_labels(self):
     """See base class."""
@@ -197,7 +196,7 @@ def convert_examples_to_features(examples, label_list, max_seq_length, tokenizer
     """Loads a data file into a list of `InputBatch`s."""
 
     label_map = {label : i for i, label in enumerate(label_list)}
-    print(label_map)
+    # print(label_map)
     max_aspect = 0
     features = []
     for (ex_index, example) in enumerate(examples):
@@ -291,16 +290,16 @@ def convert_examples_to_features(examples, label_list, max_seq_length, tokenizer
         assert len(segment_ids) == max_seq_length
 
         label_id = label_map[example.label]
-        if ex_index < 5:
-            logger.info("*** Example ***")
-            logger.info("guid: %s" % (example.guid))
-            logger.info("tokens: %s" % " ".join(
-                    [str(x) for x in tokens]))
-            logger.info("input_ids: %s" % " ".join([str(x) for x in input_ids]))
-            logger.info("input_mask: %s" % " ".join([str(x) for x in input_mask]))
-            logger.info(
-                    "segment_ids: %s" % " ".join([str(x) for x in segment_ids]))
-            logger.info("label: %s (id = %d)" % (example.label, label_id))
+        # if ex_index < 5:
+        #     logger.info("*** Example ***")
+        #     logger.info("guid: %s" % (example.guid))
+        #     logger.info("tokens: %s" % " ".join(
+        #             [str(x) for x in tokens]))
+        #     logger.info("input_ids: %s" % " ".join([str(x) for x in input_ids]))
+        #     logger.info("input_mask: %s" % " ".join([str(x) for x in input_mask]))
+        #     logger.info(
+        #             "segment_ids: %s" % " ".join([str(x) for x in segment_ids]))
+        #     logger.info("label: %s (id = %d)" % (example.label, label_id))
 
         features.append(
                 InputFeatures(input_ids=input_ids,
@@ -507,6 +506,7 @@ def main():
                              "Positive power of 2: static loss scaling value.\n")
     parser.add_argument('--server_ip', type=str, default='', help="Can be used for distant debugging.")
     parser.add_argument('--server_port', type=str, default='', help="Can be used for distant debugging.")
+    parser.add_argument('--best_epoch', type=int, help="the best epoch for predict")
     args = parser.parse_args()
 
     setting_logging(args.task_desc)
@@ -692,7 +692,7 @@ def main():
             for step, batch in enumerate(tqdm(train_dataloader, desc="Iteration")):
                 batch = tuple(t.to(device) for t in batch)
                 input_ids, input_mask, segment_ids, start_end_idx, input_tag_ids, label_ids = batch
-                loss = model(input_ids, segment_ids, input_mask, start_end_idx, input_tag_ids,  label_ids, no_cuda=True if n_gpu else False)
+                loss = model(input_ids, segment_ids, input_mask, start_end_idx, input_tag_ids,  label_ids)
                 if n_gpu > 1:
                     loss = loss.mean() # mean() to average on multi-gpu.
                 if args.gradient_accumulation_steps > 1:
@@ -808,105 +808,6 @@ def main():
                         writer.write("Epoch: %s, %s = %s\n" % (str(epoch), key, str(result[key])))
             logger.info("best epoch: %s, result:  %s", str(best_epoch), str(best_result))
 
-    # if args.do_eval:
-    #     #for epoch in ["1"]:
-    #     best_result = 0.0
-    #     for epoch in trange(int(args.num_train_epochs), desc="Epoch"):
-    #         eval_examples = processor.get_dev_examples(args.data_dir)
-    #         eval_features = convert_examples_to_features(
-    #             eval_examples, label_list, args.max_seq_length, tokenizer, srl_predictor=srl_predictor)
-    #         eval_features = transform_tag_features(args.max_num_aspect, eval_features, tag_tokenizer,
-    #                                                args.max_seq_length)
-
-    #         logger.info("***** Running evaluation *****")
-    #         logger.info("  Num examples = %d", len(eval_examples))
-    #         logger.info("  Batch size = %d", args.eval_batch_size)
-    #         all_input_ids = torch.tensor([f.input_ids for f in eval_features], dtype=torch.long)
-    #         all_input_mask = torch.tensor([f.input_mask for f in eval_features], dtype=torch.long)
-    #         all_segment_ids = torch.tensor([f.segment_ids for f in eval_features], dtype=torch.long)
-    #         all_label_ids = torch.tensor([f.label_id for f in eval_features], dtype=torch.long)
-    #         all_start_end_idx = torch.tensor([f.orig_to_token_split_idx for f in eval_features], dtype=torch.long)
-    #         all_input_tag_ids = torch.tensor([f.input_tag_ids for f in eval_features], dtype=torch.long)
-    #         eval_data = TensorDataset(all_input_ids, all_input_mask, all_segment_ids, all_start_end_idx,
-    #                                   all_input_tag_ids, all_label_ids)
-    #         # Run prediction for full data
-    #         eval_sampler = SequentialSampler(eval_data)
-    #         eval_dataloader = DataLoader(eval_data, sampler=eval_sampler, batch_size=args.eval_batch_size)
-
-    #         # epoch = 1
-    #         output_model_file = os.path.join(args.output_dir, str(epoch) + "_pytorch_model.bin")
-    #         model_state_dict = torch.load(output_model_file)
-    #         predict_model = BertForSequenceClassificationTag.from_pretrained(args.bert_model,
-    #                                                                          state_dict=model_state_dict,
-    #                                                                          num_labels=num_labels,
-    #                                                                          tag_config=tag_config)
-    #         predict_model.to(device)
-    #         predict_model.eval()
-    #         eval_loss, eval_accuracy = 0, 0
-    #         nb_eval_steps, nb_eval_examples = 0, 0
-    #         total_TP, total_FP, total_FN, total_TN = 0, 0, 0, 0
-    #         for input_ids, input_mask, segment_ids, start_end_idx, input_tag_ids, label_ids in tqdm(
-    #                 eval_dataloader, desc="Evaluating"):
-    #             input_ids = input_ids.to(device)
-    #             input_mask = input_mask.to(device)
-    #             segment_ids = segment_ids.to(device)
-    #             label_ids = label_ids.to(device)
-    #             start_end_idx = start_end_idx.to(device)
-    #             input_tag_ids = input_tag_ids.to(device)
-    #             with torch.no_grad():
-    #                 tmp_eval_loss = predict_model(input_ids, segment_ids, input_mask, start_end_idx, input_tag_ids,
-    #                                               label_ids)
-    #                 logits = predict_model(input_ids, segment_ids, input_mask, start_end_idx, input_tag_ids,
-    #                                        None)
-    #             logits = logits.detach().cpu().numpy()
-    #             label_ids = label_ids.to('cpu').numpy()
-    #             tmp_eval_accuracy = accuracy(logits, label_ids)
-
-    #             eval_loss += tmp_eval_loss.mean().item()
-    #             eval_accuracy += tmp_eval_accuracy
-
-    #             nb_eval_examples += input_ids.size(0)
-    #             nb_eval_steps += 1
-
-    #         eval_loss = eval_loss / nb_eval_steps
-    #         eval_accuracy = eval_accuracy / nb_eval_examples
-    #         if eval_accuracy > best_result:
-    #             best_epoch = epoch
-    #             best_result = eval_accuracy
-    #         loss = tr_loss / nb_tr_steps if args.do_train else None
-    #         result = {'eval_loss': eval_loss,
-    #                   'eval_accuracy': eval_accuracy,
-    #                   'global_step': global_step,
-    #                   'loss': loss}
-    #         if task_name == "cola":
-    #             # TODO:  eval_mcc = mcc(total_pred, total_labels)
-    #             # result["eval_mcc"] = eval_mcc
-    #             pass
-    #         elif task_name == "mrpc" or task_name == "qqp":  # need F1 score
-    #             if total_TP + total_FP == 0:
-    #                 P = 0
-    #             else:
-    #                 P = total_TP / (total_TP + total_FP)
-    #             if total_TP + total_FN == 0:
-    #                 R = 0
-    #             else:
-    #                 R = total_TP / (total_TP + total_FN)
-    #             if P + R == 0:
-    #                 F1 = 0
-    #             else:
-    #                 F1 = 2.00 * P * R / (P + R)
-    #             result["Precision"] = P
-    #             result["Recall"] = R
-    #             result["F1 score"] = F1
-    #         output_eval_file = os.path.join(args.output_dir, "dev_results.txt")
-    #         with open(output_eval_file, "a") as writer:
-    #             logger.info("***** Eval results *****")
-    #             for key in sorted(result.keys()):
-    #                 logger.info("Epoch: %s,  %s = %s", str(epoch), key, str(result[key]))
-    #                 writer.write("Epoch: %s, %s = %s\n" % (str(epoch), key, str(result[key])))
-    #         logger.info("current epoch: %s, result:  %s", str(epoch), json.dumps(result, ensure_ascii=False))
-    #         logger.info("best epoch: %s, result:  %s", str(best_epoch), str(best_result))
-
     if args.do_test:
         best_result = 0.0
         #for epoch in ["1"]:
@@ -936,7 +837,7 @@ def main():
 
             # epoch = 1
             output_model_file = os.path.join(args.output_dir, str(epoch) + "_pytorch_model.bin")
-            model_state_dict = torch.load(output_model_file, map_location=device)
+            model_state_dict = torch.load(output_model_file)
             predict_model = BertForSequenceClassificationTag.from_pretrained(args.bert_model,
                                                                              state_dict=model_state_dict,
                                                                              num_labels=num_labels,
@@ -960,7 +861,7 @@ def main():
                     tmp_eval_loss = predict_model(input_ids, segment_ids, input_mask, start_end_idx, input_tag_ids,
                                                   label_ids, n_gpu < 1)
                     logits = predict_model(input_ids, segment_ids, input_mask, start_end_idx, input_tag_ids,
-                                           None, n_gpu < 1)
+                                           None)
                 logits = logits.detach().cpu().numpy()
                 label_ids = label_ids.to('cpu').numpy()
                 tmp_eval_accuracy = accuracy(logits, label_ids)
@@ -1022,53 +923,54 @@ def main():
             logger.info("best epoch: %s, result:  %s", str(best_epoch), str(best_result))
 
     if args.do_predict:
-        eval_examples = processor.get_test_examples(args.data_dir)
-        eval_features = convert_examples_to_features(
-            eval_examples, label_list, args.max_seq_length, tokenizer,srl_predictor=srl_predictor )
-        eval_features = transform_tag_features(args.max_num_aspect, eval_features, tag_tokenizer, args.max_seq_length)
-        logger.info("***** Running evaluation *****")
-        logger.info("  Num examples = %d", len(eval_examples))
-        logger.info("  Batch size = %d", args.eval_batch_size)
-        all_input_ids = torch.tensor([f.input_ids for f in eval_features], dtype=torch.long)
-        all_input_mask = torch.tensor([f.input_mask for f in eval_features], dtype=torch.long)
-        all_segment_ids = torch.tensor([f.segment_ids for f in eval_features], dtype=torch.long)
-        all_start_end_idx = torch.tensor([f.orig_to_token_split_idx for f in eval_features], dtype=torch.long)
-        all_input_tag_ids = torch.tensor([f.input_tag_ids for f in eval_features], dtype=torch.long)
-        eval_data = TensorDataset(all_input_ids, all_input_mask, all_segment_ids, all_start_end_idx,
-                                  all_input_tag_ids)
-        # Run prediction for full data
-        eval_sampler = SequentialSampler(eval_data)
-        eval_dataloader = DataLoader(eval_data, sampler=eval_sampler, batch_size=args.eval_batch_size)
-
+        best_epoch = args.best_epoch
         output_model_file = os.path.join(args.output_dir, str(best_epoch)+ "_pytorch_model.bin")
-        model_state_dict = torch.load(output_model_file)
+        model_state_dict = torch.load(output_model_file, map_location=device)
         predict_model = BertForSequenceClassificationTag.from_pretrained(args.bert_model, state_dict=model_state_dict,num_labels = num_labels,tag_config=tag_config)
         predict_model.to(device)
         predict_model.eval()
-        predictions = []
-        output_logits_file = os.path.join(args.output_dir, str(best_epoch) + "_logits_results.tsv")
-        with open(output_logits_file, "w") as writer:
-            for input_ids, input_mask, segment_ids, start_end_idx, input_tag_ids in tqdm(
-                    eval_dataloader, desc="Evaluating"):
-                input_ids = input_ids.to(device)
-                input_mask = input_mask.to(device)
-                segment_ids = segment_ids.to(device)
-                start_end_idx = start_end_idx.to(device)
-                input_tag_ids = input_tag_ids.to(device)
-                with torch.no_grad():
-                    logits = predict_model(input_ids, segment_ids, input_mask, start_end_idx, input_tag_ids, None)
-                logits = logits.detach().cpu().numpy()
-                for (i, prediction) in enumerate(logits):
-                    predict_label = np.argmax(prediction)
-                    predictions.append(predict_label)
+        prompt = "\nPlease enter the query(Enter 'quit' when you are finished.) :\n"
+        while True:
+            query = input(prompt)
+            if query == 'quit':
+                break
+            else:
+                print("input query: {}".format(query))
+                time_start = datetime.datetime.now()
+                eval_examples = processor.get_test_examples_online(query.strip())
+                time_srl = datetime.datetime.now()
+                print("time cost srl: {}".format((time_srl-time_start).microseconds/1000))
+                eval_features = convert_examples_to_features(
+                    eval_examples, label_list, args.max_seq_length, tokenizer,srl_predictor=srl_predictor )
+                eval_features = transform_tag_features(args.max_num_aspect, eval_features, tag_tokenizer, args.max_seq_length)
+                all_input_ids = torch.tensor([f.input_ids for f in eval_features], dtype=torch.long)
+                all_input_mask = torch.tensor([f.input_mask for f in eval_features], dtype=torch.long)
+                all_segment_ids = torch.tensor([f.segment_ids for f in eval_features], dtype=torch.long)
+                all_start_end_idx = torch.tensor([f.orig_to_token_split_idx for f in eval_features], dtype=torch.long)
+                all_input_tag_ids = torch.tensor([f.input_tag_ids for f in eval_features], dtype=torch.long)
+                eval_data = TensorDataset(all_input_ids, all_input_mask, all_segment_ids, all_start_end_idx,
+                                        all_input_tag_ids)
+                # Run prediction for full data
+                eval_sampler = SequentialSampler(eval_data)
+                eval_dataloader = DataLoader(eval_data, sampler=eval_sampler, batch_size=args.eval_batch_size)
 
-        output_test_file = os.path.join(args.output_dir, str(best_epoch) + "_pred_results.tsv")
-        index = 0
-        with open(output_test_file, "w") as writer:
-            writer.write("index" + "\t" + "prediction" + "\n")
-            for pred in predictions:
-                writer.write(str(index) + "\t" + str(label_list[int(pred)]) + "\n")
-                index += 1
+                for input_ids, input_mask, segment_ids, start_end_idx, input_tag_ids in eval_dataloader:
+                    input_ids = input_ids.to(device)
+                    input_mask = input_mask.to(device)
+                    segment_ids = segment_ids.to(device)
+                    start_end_idx = start_end_idx.to(device)
+                    input_tag_ids = input_tag_ids.to(device)
+                    time_get_feature = datetime.datetime.now()
+                    print("time cost feature: {}".format((time_get_feature-time_srl).microseconds/1000))
+                    with torch.no_grad():
+                        logits = predict_model(input_ids, segment_ids, input_mask, start_end_idx, input_tag_ids, None, no_cuda=n_gpu < 1)
+                    logits = logits.detach().cpu().numpy()
+                    for (i, prediction) in enumerate(logits):
+                        predict_label = np.argmax(prediction)
+                        time_end = datetime.datetime.now()
+                        time_cost = (time_end - time_get_feature).microseconds/1000
+                        print("predict label:{}, sembert predict time cost: {} ms".format(predict_label, str(time_cost)))
+
 
 if __name__ == "__main__":
     main()

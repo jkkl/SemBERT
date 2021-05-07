@@ -57,7 +57,7 @@ class HanlpSRLPredictor(object):
         all_srl_list = []
         for srl in res['srl'][0]:
             one_srl_dict = {}
-            srl_list = ["o"] * len(query)
+            srl_list = ["O"] * len(query)
             for srl_tuple in srl:
                 token = srl_tuple[0]
                 tag = srl_tuple[1]
