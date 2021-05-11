@@ -14,6 +14,7 @@ import numpy as np
 import torch
 import pickle
 import json
+import codecs
 from torch.utils.data import (DataLoader, RandomSampler, SequentialSampler,
                               TensorDataset)
 from torch.utils.data.distributed import DistributedSampler
@@ -22,7 +23,7 @@ from tag_model.modeling import TagConfig
 from data_process.datasets import SenSequence, DocSequence, QuerySequence, QueryTagSequence, \
     DocTagSequence
 from pytorch_pretrained_bert.file_utils import PYTORCH_PRETRAINED_BERT_CACHE
-from pytorch_pretrained_bert.modeling import BertForSequenceClassificationTag, BertConfig, WEIGHTS_NAME, CONFIG_NAME
+from pytorch_pretrained_bert.modeling import BertForSequenceClassificationTag, RcnnForSequenceClassificationTag, BertConfig, WEIGHTS_NAME, CONFIG_NAME
 from pytorch_pretrained_bert.tokenization import BertTokenizer
 from tag_model.tag_tokenization import TagTokenizer
 from pytorch_pretrained_bert.optimization import BertAdam, warmup_linear
@@ -55,7 +56,6 @@ class InputExample(object):
         self.text_b = text_b
         self.label = label
 
-
 class InputFeatures(object):
     """A single set of features of data."""
 
@@ -75,6 +75,52 @@ class InputFeatures(object):
         self.orig_to_token_split_idx = orig_to_token_split_idx
         self.label_id = label_id
         self.text_a = text_a
+        
+
+class InputSoftLabelExample(object):
+    """A single training/test example for simple sequence classification."""
+
+    def __init__(self, guid, query, text_a, bert_hidden, logits, text_b=None, label=None):
+        """Constructs a InputExample.
+
+        Args:
+            guid: Unique id for the example.
+            text_a: string. The untokenized text of the first sequence. For single
+            sequence tasks, only this sequence must be specified.
+            text_b: (Optional) string. The untokenized text of the second sequence.
+            Only must be specified for sequence pair tasks.
+            label: (Optional) string. The label of the example. This should be
+            specified for train and dev examples, but not for test examples.
+        """
+        self.guid = guid
+        self.query = query
+        self.text_a = text_a  # 包含tag信息的json
+        self.bert_hidden = bert_hidden
+        self.logits = logits
+        self.text_b = text_b
+        self.label = label
+
+class InputSoftLabelFeatures(object):
+    """A single set of features of data."""
+
+    def __init__(self, input_ids, input_mask, segment_ids, token_tag_sequence_a, token_tag_sequence_b, 
+                 len_seq_a, len_seq_b, input_tag_ids, input_tag_verbs, input_tag_len, orig_to_token_split_idx, label_id,
+                 text_a,  target_encoder_hidden, target_logits):
+        self.input_ids = input_ids
+        self.input_mask = input_mask
+        self.segment_ids = segment_ids
+        self.token_tag_sequence_a = token_tag_sequence_a
+        self.token_tag_sequence_b = token_tag_sequence_b
+        self.len_seq_a = len_seq_a
+        self.len_seq_b = len_seq_b
+        self.input_tag_ids = input_tag_ids
+        self.input_tag_verbs = input_tag_verbs
+        self.input_tag_len = input_tag_len
+        self.orig_to_token_split_idx = orig_to_token_split_idx
+        self.label_id = label_id
+        self.text_a = text_a
+        self.target_encoder_hidden = target_encoder_hidden
+        self.target_logits = target_logits
 
 
 class DataProcessor(object):
@@ -126,9 +172,15 @@ class IntentionProcessor(DataProcessor):
     return self._create_examples(
         self._read_tsv(os.path.join(data_dir, "test.tsv_tag")), "test")
 
-  def get_test_examples_online(self, query):
+  def get_test_examples_online(self, query, tag=None):
     """TODO bug See base class."""
-    input_format = query_format(query)
+    if not tag:
+        from data_process.data_proc import hanlpSRLPredictor
+        tag = hanlpSRLPredictor.predict(query)
+        tag = json.dumps(tag, ensure_ascii=False)
+    label = "1"
+    sample_id = 0
+    input_format = "{}\t{}\t{}\t{}\n".format(sample_id, query, tag, label)
     input_format_list = input_format.strip().split('\t')
 
     return self._create_examples(
@@ -157,41 +209,142 @@ class IntentionProcessor(DataProcessor):
         class_id_name[str(i)] = line
     return class_id_name
 
-class ColaProcessor(DataProcessor):
+class SoftLabelProcessor(DataProcessor):
   """Processor for the CoLA data set (GLUE version)."""
+  def __init__(self, data_dir):
+      super().__init__()
+      self.class_map = self._load_class_map(self._read_tsv(os.path.join(data_dir, "class.txt")))
+      logger.info("class_map:{}".format(json.dumps(self.class_map, ensure_ascii=False)))
+      
 
   def get_train_examples(self, data_dir):
     """See base class."""
     return self._create_examples(
-        self._read_tsv(os.path.join(data_dir, "train.tsv_tag")), "train")
+        self._read_tsv(os.path.join(data_dir, "train.tsv_tag.soft_label.txt.head")), "train")
 
   def get_dev_examples(self, data_dir):
     """See base class."""
     return self._create_examples(
-        self._read_tsv(os.path.join(data_dir, "dev.tsv_tag")), "dev")
+        self._read_tsv(os.path.join(data_dir, "dev.tsv_tag.soft_label.txt")), "dev")
 
   def get_test_examples(self, data_dir):
     """TODO bug See base class."""
     return self._create_examples(
-        self._read_tsv(os.path.join(data_dir, "test.tsv_tag")), "test")
+        self._read_tsv(os.path.join(data_dir, "test.tsv_tag.soft_label.txt")), "test")
+
+  def get_test_examples_online(self, query, tag=None):
+    """TODO bug See base class."""
+    if not tag:
+        from data_process.data_proc import hanlpSRLPredictor
+        tag = hanlpSRLPredictor.predict(query)
+        tag = json.dumps(tag, ensure_ascii=False)
+    label = "1"
+    sample_id = 0
+    input_format = "{}\t{}\t{}\t{}\n".format(sample_id, query, tag, label)
+    input_format_list = input_format.strip().split('\t')
+
+    return self._create_examples(
+        [input_format_list], "test")
 
   def get_labels(self):
     """See base class."""
-    return ["0", "1"]
+    logger.info(self.class_map.keys())
+    return self.class_map.keys()
 
   def _create_examples(self, lines, set_type):
     """Creates examples for the training and dev sets."""
     examples = []
     for (i, line) in enumerate(lines):
+      if len(line) < 4:
+          print("bad data {}".format(line))
+          continue
       guid = "%s-%s" % (set_type, i)
-      text_a = line[-2]
-      label = line[-1]
+      query = line[0]
+      text_a = line[1]
+      logits = json.loads(line[2])
+      bert_hidden = json.loads(line[3])
+      label = '1' # train student not use label
       examples.append(
-          InputExample(guid=guid, text_a=text_a, text_b=None, label=label))
+          InputSoftLabelExample(guid=guid, query=query, text_a=text_a, logits=logits, bert_hidden=bert_hidden, label=label))
     return examples
 
+  def _load_class_map(self, lines):
+    """Creates examples for the training and dev sets."""
+    class_id_name = {}
+    for (i, line) in enumerate(lines):
+        class_id_name[str(i)] = line
+    return class_id_name
 
 tag_vocab = []  # 初始值，用于对其query中的特殊标记
+seq_len = 32
+char2id = {l.strip().split('\t')[0]:int(l.strip().split('\t')[1]) for l in codecs.open('./pre-trained-models/char2id.txt', encoding='utf-8').readlines()}
+def get_token_ids(query):
+    # norm_query = query.replace('person', '#')
+    if len(query) > seq_len:
+        query = query[:seq_len]
+    cids = [char2id['padding']] * seq_len
+    for i, char in enumerate(query):
+        if char in char2id:
+            cids[i]=char2id[char]
+        else:
+            cids[i]=char2id['unknown']
+    return cids
+
+
+def convert_soft_label_examples_to_features(examples, label_list, max_seq_length, tokenizer, srl_predictor):
+    """Loads a data file into a list of `InputBatch`s."""
+
+    label_map = {label : i for i, label in enumerate(label_list)}
+
+    # max_aspect = 0
+    features = []
+    for (ex_index, example) in enumerate(examples):
+        len_query = len(example.query)
+        input_ids = get_token_ids(example.query)
+        tok_to_orig_index_a = []  # subword_token_index -> org_word_index
+        tag_sequence = get_tags(srl_predictor, example.text_a, tag_vocab)
+        if not tag_sequence:
+            continue
+        token_tag_sequence_a = QueryTagSequence(tag_sequence[0], tag_sequence[1])
+        tokens_a_org = tag_sequence[0]
+        # if len(tag_sequence[1])> max_aspect:
+            # max_aspect = len(tag_sequence[1])
+        # tok_to_orig_index_a.append(0)  # [CLS]
+
+        assert len(input_ids) == max_seq_length
+
+        label_id = label_map[example.label]
+        # if ex_index < 3:
+        #     logger.info("*** Example ***")
+        #     logger.info("guid: %s" % (example.guid))
+        #     logger.info("tokens: %s" % " ".join(
+        #             [str(x) for x in tokens]))
+        #     logger.info("input_ids: %s" % " ".join([str(x) for x in input_ids]))
+        #     logger.info("input_mask: %s" % " ".join([str(x) for x in input_mask]))
+        #     logger.info(
+        #             "segment_ids: %s" % " ".join([str(x) for x in segment_ids]))
+        #     logger.info("label: %s (id = %d)" % (example.label, label_id))
+
+        features.append(
+                InputSoftLabelFeatures(input_ids=input_ids,
+                              input_mask=None,
+                              segment_ids=None,
+                              token_tag_sequence_a=token_tag_sequence_a,
+                              token_tag_sequence_b=None,
+                              len_seq_a=len_query,
+                              len_seq_b=None,
+                              input_tag_ids=None,
+                              input_tag_verbs=None,
+                              input_tag_len=None,
+                              orig_to_token_split_idx=None,
+                              label_id=label_id,
+                              text_a="".join(tokens_a_org),
+                              target_encoder_hidden=example.bert_hidden,
+                              target_logits=example.logits
+                              ))
+    return features
+
+
 def convert_examples_to_features(examples, label_list, max_seq_length, tokenizer, srl_predictor):
     """Loads a data file into a list of `InputBatch`s."""
 
@@ -318,7 +471,6 @@ def convert_examples_to_features(examples, label_list, max_seq_length, tokenizer
                               ))
     return features
 
-
 def transform_tag_features(max_num_aspect, features, tag_tokenizer, max_seq_length):
     #now convert the tags into ids
     #print("vocab_size: ",len(tag_vocab))
@@ -399,6 +551,7 @@ def Fscore(out, labels):
 def mcc(out, labels):
     return mtc.matthews_corrcoef(out, labels)
 
+
 def main():
     parser = argparse.ArgumentParser()
 
@@ -451,7 +604,10 @@ def main():
     parser.add_argument("--do_eval",
                         action='store_true',
                         help="Whether to run eval on the dev set.")
-    parser.add_argument("--do_predict",
+    parser.add_argument("--do_predict_online",
+                        action='store_true',
+                        help="Whether to run eval on the dev set.")
+    parser.add_argument("--predict_soft_label",
                         action='store_true',
                         help="Whether to run eval on the dev set.")
     parser.add_argument("--do_test",
@@ -507,6 +663,7 @@ def main():
     parser.add_argument('--server_ip', type=str, default='', help="Can be used for distant debugging.")
     parser.add_argument('--server_port', type=str, default='', help="Can be used for distant debugging.")
     parser.add_argument('--best_epoch', type=int, help="the best epoch for predict")
+    parser.add_argument('--soft_label_input_file', type=str, help="the input file of predict soft label for student distill")
     args = parser.parse_args()
 
     setting_logging(args.task_desc)
@@ -520,7 +677,7 @@ def main():
         ptvsd.wait_for_attach()
 
     processors = {
-        "cola": ColaProcessor,
+        "softlabel": SoftLabelProcessor,
         "intention": IntentionProcessor,
     }
 
@@ -548,7 +705,8 @@ def main():
     if n_gpu > 0:
         torch.cuda.manual_seed_all(args.seed)
 
-    if not args.do_train and not args.do_eval and not args.do_predict and not args.do_test:
+    if not args.do_train and not args.do_eval and not args.do_test \
+        and not args.do_predict_online and not args.predict_soft_label:
         raise ValueError("At least one of `do_train` or `do_eval` must be True.")
 
     if os.path.exists(args.output_dir) and os.listdir(args.output_dir) and args.do_train:
@@ -582,8 +740,8 @@ def main():
 
     train_features = None
     if args.do_train:
-        train_features = convert_examples_to_features(
-            train_examples, label_list, args.max_seq_length, tokenizer,srl_predictor=srl_predictor )
+        train_features = convert_soft_label_examples_to_features(
+            train_examples, label_list, args.max_seq_length, None,srl_predictor=srl_predictor )
         #TagTokenizer.make_tag_vocab("tag_vocab", tag_vocab)
     tag_tokenizer = TagTokenizer()
     vocab_size = len(tag_tokenizer.ids_to_tags)
@@ -596,9 +754,7 @@ def main():
                            num_aspect=args.max_num_aspect)
     # Prepare model
     cache_dir = args.cache_dir if args.cache_dir else os.path.join(PYTORCH_PRETRAINED_BERT_CACHE, 'distributed_{}'.format(args.local_rank))
-    model = BertForSequenceClassificationTag.from_pretrained(args.bert_model,
-              cache_dir=PYTORCH_PRETRAINED_BERT_CACHE / 'distributed_{}'.format(args.local_rank),
-              num_labels = num_labels,tag_config=tag_config)
+    model = RcnnForSequenceClassificationTag(tag_config=tag_config)
     if args.fp16:
         model.half()
     model.to(device)
@@ -654,12 +810,12 @@ def main():
         logger.info("  Batch size = %d", args.train_batch_size)
         logger.info("  Num steps = %d", num_train_optimization_steps)
         all_input_ids = torch.tensor([f.input_ids for f in train_features], dtype=torch.long)
-        all_input_mask = torch.tensor([f.input_mask for f in train_features], dtype=torch.long)
-        all_segment_ids = torch.tensor([f.segment_ids for f in train_features], dtype=torch.long)
+        all_target_logits = torch.tensor([f.target_logits for f in train_features], dtype=torch.float)
+        all_target_encoder_hidden = torch.tensor([f.target_encoder_hidden for f in train_features], dtype=torch.float)
         all_label_ids = torch.tensor([f.label_id for f in train_features], dtype=torch.long)
-        all_start_end_idx = torch.tensor([f.orig_to_token_split_idx for f in train_features], dtype=torch.long)
+        # all_start_end_idx = torch.tensor([f.orig_to_token_split_idx for f in train_features], dtype=torch.long)
         all_input_tag_ids = torch.tensor([f.input_tag_ids for f in train_features], dtype=torch.long)
-        train_data = TensorDataset(all_input_ids, all_input_mask, all_segment_ids, all_start_end_idx, all_input_tag_ids, all_label_ids)
+        train_data = TensorDataset(all_input_ids, all_target_logits, all_target_encoder_hidden, all_input_tag_ids, all_label_ids)
         if args.local_rank == -1:
             train_sampler = RandomSampler(train_data)
         else:
@@ -668,19 +824,19 @@ def main():
         eval_dataloader = None
         if args.do_eval and (args.local_rank == -1 or torch.distributed.get_rank() == 0):
             eval_examples = processor.get_dev_examples(args.data_dir)
-            eval_features = convert_examples_to_features(
+            eval_features = convert_soft_label_examples_to_features(
                 eval_examples, label_list, args.max_seq_length, tokenizer,srl_predictor=srl_predictor )
             eval_features = transform_tag_features(args.max_num_aspect, eval_features, tag_tokenizer, args.max_seq_length)
             logger.info("***** Running evaluation *****")
             logger.info("  Num examples = %d", len(eval_examples))
             logger.info("  Batch size = %d", args.eval_batch_size)
             all_input_ids = torch.tensor([f.input_ids for f in eval_features], dtype=torch.long)
-            all_input_mask = torch.tensor([f.input_mask for f in eval_features], dtype=torch.long)
-            all_segment_ids = torch.tensor([f.segment_ids for f in eval_features], dtype=torch.long)
+            all_target_logits = torch.tensor([f.target_logits for f in eval_features], dtype=torch.float)
+            all_target_encoder_hidden = torch.tensor([f.target_encoder_hidden for f in eval_features], dtype=torch.float)
             all_label_ids = torch.tensor([f.label_id for f in eval_features], dtype=torch.long)
-            all_start_end_idx = torch.tensor([f.orig_to_token_split_idx for f in eval_features], dtype=torch.long)
+            # all_start_end_idx = torch.tensor([f.orig_to_token_split_idx for f in eval_features], dtype=torch.long)
             all_input_tag_ids = torch.tensor([f.input_tag_ids for f in eval_features], dtype=torch.long)
-            eval_data = TensorDataset(all_input_ids, all_input_mask, all_segment_ids, all_start_end_idx, all_input_tag_ids, all_label_ids)
+            eval_data = TensorDataset(all_input_ids, all_target_logits, all_target_encoder_hidden, all_input_tag_ids, all_label_ids)
             # Run prediction for full data
             eval_sampler = SequentialSampler(eval_data)
             eval_dataloader = DataLoader(eval_data, sampler=eval_sampler, batch_size=args.eval_batch_size)
@@ -691,8 +847,8 @@ def main():
             nb_tr_examples, nb_tr_steps = 0, 0
             for step, batch in enumerate(tqdm(train_dataloader, desc="Iteration")):
                 batch = tuple(t.to(device) for t in batch)
-                input_ids, input_mask, segment_ids, start_end_idx, input_tag_ids, label_ids = batch
-                loss = model(input_ids, segment_ids, input_mask, start_end_idx, input_tag_ids,  label_ids)
+                input_ids, target_logits, target_encoder_hidden, input_tag_ids, label_ids = batch
+                loss, logits = model(input_ids, target_encoder_hidden=target_encoder_hidden, target_logits=target_logits, input_tag_ids=input_tag_ids, labels=label_ids)
                 if n_gpu > 1:
                     loss = loss.mean() # mean() to average on multi-gpu.
                 if args.gradient_accumulation_steps > 1:
@@ -721,7 +877,8 @@ def main():
                 torch.save(model_to_save.state_dict(), output_model_file)
             if args.do_eval and (args.local_rank == -1 or torch.distributed.get_rank() == 0):
                 model_state_dict = torch.load(output_model_file)
-                predict_model = BertForSequenceClassificationTag.from_pretrained(args.bert_model, state_dict=model_state_dict,num_labels = num_labels,tag_config=tag_config)
+                predict_model = RcnnForSequenceClassificationTag(tag_config=tag_config) 
+                predict_model = predict_model.load_state_dict(torch.load(output_model_file, map_location=torch.device('cpu'))['net'])
                 predict_model.to(device)
                 predict_model.eval()
                 eval_loss, eval_accuracy = 0, 0
@@ -742,11 +899,8 @@ def main():
                         start_end_idx = start_end_idx.to(device)
                         input_tag_ids = input_tag_ids.to(device)
                         with torch.no_grad():
-                            tmp_eval_loss = predict_model(input_ids, segment_ids, input_mask, start_end_idx,
-                                                          input_tag_ids, label_ids)
-                            logits = predict_model(input_ids, segment_ids, input_mask, start_end_idx, input_tag_ids,
-                                                   None)
-
+                            tmp_eval_loss, logits = predict_model(input_ids, target_encoder_hidden=target_encoder_hidden, target_logits=target_logits, input_tag_ids=input_tag_ids, labels=label_ids)
+                            # logits = predict_model(input_ids, target_encoder_hidden=target_encoder_hidden, target_logits=target_logits, input_tag_ids=input_tag_ids, labels=label_ids)
                         logits = logits.detach().cpu().numpy()
                         label_ids = label_ids.to('cpu').numpy()
                         tmp_eval_accuracy = accuracy(logits, label_ids)
@@ -922,7 +1076,7 @@ def main():
             logger.info("current epoch: %s, result:  %s", str(epoch), str(eval_accuracy))
             logger.info("best epoch: %s, result:  %s", str(best_epoch), str(best_result))
 
-    if args.do_predict:
+    if args.do_predict_online:
         best_epoch = args.best_epoch
         output_model_file = os.path.join(args.output_dir, str(best_epoch)+ "_pytorch_model.bin")
         model_state_dict = torch.load(output_model_file, map_location=device)
@@ -963,13 +1117,67 @@ def main():
                     time_get_feature = datetime.datetime.now()
                     print("time cost feature: {}".format((time_get_feature-time_srl).microseconds/1000))
                     with torch.no_grad():
-                        logits = predict_model(input_ids, segment_ids, input_mask, start_end_idx, input_tag_ids, None, no_cuda=n_gpu < 1)
+                        logits, bert_hidden, tag_hidden = predict_model(input_ids, segment_ids, input_mask, start_end_idx, input_tag_ids, None, no_cuda=n_gpu < 1)
                     logits = logits.detach().cpu().numpy()
                     for (i, prediction) in enumerate(logits):
                         predict_label = np.argmax(prediction)
                         time_end = datetime.datetime.now()
                         time_cost = (time_end - time_get_feature).microseconds/1000
                         print("predict label:{}, sembert predict time cost: {} ms".format(predict_label, str(time_cost)))
+    if args.predict_soft_label:
+        best_epoch = args.best_epoch
+        output_model_file = os.path.join(args.output_dir, str(best_epoch)+ "_pytorch_model.bin")
+        model_state_dict = torch.load(output_model_file, map_location=device)
+        predict_model = BertForSequenceClassificationTag.from_pretrained(args.bert_model, state_dict=model_state_dict,num_labels = num_labels,tag_config=tag_config)
+        predict_model.to(device)
+        predict_model.eval()
+        soft_label_inuput_file = args.soft_label_input_file
+        soft_label_output_file = args.soft_label_input_file + ".soft_label.txt"
+
+        fw = open(soft_label_output_file, 'w')
+        examples= IntentionProcessor._read_tsv(soft_label_inuput_file)
+        soft_label_datas = []
+        for example in examples:
+            if len(example) > 2: # 已包含tag的样本 id\tquery\ttag\tlabel
+                query = example[1]
+                tag = example[2]
+            else:
+                query = example[0]
+                tag = None
+            print("input query: {}".format(query))
+            time_start = datetime.datetime.now()
+            eval_examples = processor.get_test_examples_online(query.strip(), tag)
+            time_srl = datetime.datetime.now()
+            # print("time cost srl: {}".format((time_srl-time_start).microseconds/1000))
+            eval_features = convert_examples_to_features(
+                eval_examples, label_list, args.max_seq_length, tokenizer,srl_predictor=srl_predictor )
+            eval_features = transform_tag_features(args.max_num_aspect, eval_features, tag_tokenizer, args.max_seq_length)
+            all_input_ids = torch.tensor([f.input_ids for f in eval_features], dtype=torch.long)
+            all_input_mask = torch.tensor([f.input_mask for f in eval_features], dtype=torch.long)
+            all_segment_ids = torch.tensor([f.segment_ids for f in eval_features], dtype=torch.long)
+            all_start_end_idx = torch.tensor([f.orig_to_token_split_idx for f in eval_features], dtype=torch.long)
+            all_input_tag_ids = torch.tensor([f.input_tag_ids for f in eval_features], dtype=torch.long)
+            eval_data = TensorDataset(all_input_ids, all_input_mask, all_segment_ids, all_start_end_idx,
+                                    all_input_tag_ids)
+            # Run prediction for full data
+            eval_sampler = SequentialSampler(eval_data)
+            eval_dataloader = DataLoader(eval_data, sampler=eval_sampler, batch_size=args.eval_batch_size)
+            for input_ids, input_mask, segment_ids, start_end_idx, input_tag_ids in eval_dataloader:
+                input_ids = input_ids.to(device)
+                input_mask = input_mask.to(device)
+                segment_ids = segment_ids.to(device)
+                start_end_idx = start_end_idx.to(device)
+                input_tag_ids = input_tag_ids.to(device)
+                time_get_feature = datetime.datetime.now()
+                print("time cost feature: {}".format((time_get_feature-time_srl).microseconds/1000))
+                with torch.no_grad():
+                    logits, bert_hidden, tag_hidden = predict_model(input_ids, segment_ids, input_mask, start_end_idx, input_tag_ids, None, no_cuda=n_gpu < 1)
+                    logits = json.dumps(logits.detach().cpu().numpy().tolist())
+                    bert_hidden = json.dumps(bert_hidden.detach().cpu().numpy().tolist())
+                    tag_hidden = json.dumps(tag_hidden.detach().cpu().numpy().tolist())
+                    output_line = "\t".join([query, eval_examples[0].text_a, logits, bert_hidden, tag_hidden])
+                    fw.write(output_line + "\n")
+        fw.close()
 
 
 if __name__ == "__main__":

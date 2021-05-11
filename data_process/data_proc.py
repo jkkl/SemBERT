@@ -89,11 +89,14 @@ def data_format(input_file, output_file):
     fw.close()
     return count
 
-def query_format(query):
-    srl= hanlpSRLPredictor.predict(query)
+def query_format(query, tag=None):
+    if not tag:
+        import HanlpSRLPredictor
+        hanlpSRLPredictor = HanlpSRLPredictor()
+        tag = hanlpSRLPredictor.predict(query)
     label = "1"
     sample_id = 0
-    out_str = "{}\t{}\t{}\t{}\n".format(sample_id, query, json.dumps(srl, ensure_ascii=False), label)
+    out_str = "{}\t{}\t{}\t{}\n".format(sample_id, query, json.dumps(tag, ensure_ascii=False), label)
     return out_str
 
 

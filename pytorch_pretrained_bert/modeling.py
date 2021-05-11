@@ -15,6 +15,7 @@ import torch.nn.functional as F
 import torch
 from torch import nn
 from torch.nn import CrossEntropyLoss, MSELoss
+import codecs
 from tag_model.modeling import TagEmebedding, TagPooler
 from .file_utils import cached_path
 # from allennlp.nn.util import masked_softmax
@@ -1032,8 +1033,131 @@ class BertForSequenceClassificationTag(BertPreTrainedModel):
             loss = loss_fct(logits.view(-1, self.num_labels), labels.view(-1))
             return loss
         else:
-            return logits
+            # 输出bert cls，用于student 拟合
+            bert_hidden = bert_output[:, 0]
+            tag_hidden = tag_output[:,0]
+            return logits, bert_hidden, tag_hidden
 
+
+class RcnnForSequenceClassificationTag(nn.Module):
+    def __init__(self, hidden_size=768, hidden_dropout_prob=0.1, num_labels=2, tag_config=None):
+        super(RcnnForSequenceClassificationTag, self).__init__()
+        def load_embedding(file):
+            word_embedding = {}
+            pretrained_embeddings = []
+            
+            lines = codecs.open(file, encoding='utf-8').readlines()
+            vocab_size = int(lines[0].split(' ')[0])
+            embedding_size = int(lines[0].split(' ')[1])
+            for line in lines[1:]:
+                tokens = line.strip().split(' ')
+                token = tokens[0]
+                vector = [float(t) for t in tokens[1:]]
+                if len(vector) == embedding_size:
+                    word_embedding[token]=vector
+                    pretrained_embeddings.append(vector)
+            return word_embedding, pretrained_embeddings, embedding_size
+        char_embedding, pretrained_char_embeddings, embedding_size = load_embedding(r'./pre-trained-models/merge_sgns_char300.txt')
+        self.rcnn = RNNCNNModule(pretrained_char_embeddings, seq_len=32, embedding_size=embedding_size, hidden_dim=768, cnn_filter_sizes=(2,3,4,5,6), num_cnn_filters=32)
+        self.filter_size = 3
+        self.filter_size = 3
+        # self.cnn = CNN_conv1d(config, filter_size=self.filter_size)
+
+        self.activation = nn.Tanh()
+        self.dropout = nn.Dropout(hidden_dropout_prob)
+        if tag_config is not None:
+            hidden_size = hidden_size + tag_config.hidden_size
+            self.tag_model = TagEmebedding(tag_config)
+            self.dense = nn.Linear(tag_config.num_aspect * tag_config.hidden_size, tag_config.hidden_size)
+        else:
+            hidden_size = hidden_size
+        use_tag = True
+        if use_tag:
+            self.pool = nn.Linear(hidden_size + tag_config.hidden_size, hidden_size + tag_config.hidden_size)
+            self.classifier = nn.Linear(hidden_size + tag_config.hidden_size, num_labels)
+        else:
+            self.pool = nn.Linear(hidden_size, hidden_size)
+            self.classifier = nn.Linear(hidden_size, num_labels)
+        # self.apply(self.init_bert_weights)
+
+    def forward(self, input_ids, criterion=None, target_encoder_hidden=None, target_logits=None, input_tag_ids=None, 
+                labels=None, no_cuda=False,predict=False):
+        criterion = nn.MSELoss()
+        encoder_output = sequence_output = self.rcnn(input_ids)
+        if not predict and target_encoder_hidden != None:
+            if len(target_encoder_hidden.shape) > 2:
+                target_encoder_hidden = torch.squeeze(target_encoder_hidden)
+            loss = criterion(encoder_output, target_encoder_hidden)
+        batch_size, _ = sequence_output.size()
+        
+        max_seq_len = -1 # the real length of inuput filted padding
+
+        num_aspect = input_tag_ids.size(1)
+        input_tag_ids = input_tag_ids[:,:,:max_seq_len]
+        flat_input_tag_ids = input_tag_ids.view(-1, input_tag_ids.size(-1))
+        # print("flat_que_tag", flat_input_que_tag_ids.size())
+        tag_output = self.tag_model(flat_input_tag_ids, num_aspect)
+        # batch_size, que_len, num_aspect*tag_hidden_size
+        tag_output = tag_output.transpose(1, 2).contiguous().view(batch_size,
+                                                                    max_seq_len, -1)
+        tag_output = self.dense(tag_output)
+        # ? cnn完，tag linear完，还用cls？ tag 做了线性变换后，也是用cls，这样靠谱吗？
+        sequence_output = torch.cat((sequence_output, tag_output), 2)
+
+        first_token_tensor = sequence_output[:, 0]
+        pooled_output = self.pool(first_token_tensor)
+        pooled_output = self.activation(pooled_output)
+        pooled_output = self.dropout(pooled_output)
+        logits = self.classifier(pooled_output)
+
+        loss += criterion(logits, target_logits)
+
+        # if labels is not None:
+            # loss_fct = CrossEntropyLoss()
+            # loss = loss_fct(logits.view(-1, self.num_labels), labels.view(-1))
+            # return loss
+        # else:
+        return loss, logits
+
+
+class RNNCNNModule(nn.Module):
+    def __init__(self, pretrained_embeddings, embedding_size=100, seq_len=32, hidden_dim=128, lstm_hidden_size=300,
+                 num_lstm_layers=3,
+                 cnn_filter_sizes=(2, 3, 4, 5), num_cnn_filters=8, bidirectional=True):
+        super(RNNCNNModule, self).__init__()
+        self.embedding = nn.Embedding.from_pretrained(torch.FloatTensor(pretrained_embeddings), freeze=False)
+
+        self.lstm = nn.LSTM(input_size=embedding_size, hidden_size=lstm_hidden_size, num_layers=num_lstm_layers,
+                            bidirectional=bidirectional)
+        self.cnns = nn.ModuleList([nn.Conv1d(
+            (lstm_hidden_size + embedding_size) if not bidirectional else (lstm_hidden_size * 2 + embedding_size),
+            num_cnn_filters, filter_size) for filter_size in cnn_filter_sizes])
+        self.num_cnn_filters = num_cnn_filters
+        self.cnn_filter_sizes = cnn_filter_sizes
+        self.relu = nn.ReLU(inplace=True)
+        self.maxpoolings = nn.ModuleList([nn.MaxPool1d(seq_len - filter_size + 1) for filter_size in cnn_filter_sizes])
+        self.bns = nn.ModuleList([nn.BatchNorm1d(num_cnn_filters) for filter_size in cnn_filter_sizes])
+        self.linear = nn.Linear(num_cnn_filters * len(cnn_filter_sizes), hidden_dim, bias=True)
+
+    def forward(self, X):  # X: [batch_size, seq_len]
+        embedding_output = self.embedding(X)  # [batch_size, seq_len, embedding_size]
+        lstm_input = torch.transpose(embedding_output, 0, 1)  # [seq_len, batch_size, embedding_size]
+        lstm_output, (_, _) = self.lstm(lstm_input)  # [seq_len, batch_size, num_directions * hidden_size]
+        cnn_input = torch.transpose(lstm_output, 0, 1)  # [batch_size, seq_len, num_directions * hidden_size]
+        cnn_input = torch.cat((cnn_input, embedding_output), dim=2)  # [batch_size, seq_len, num_directions * hidden_size + embedding_size]
+        cnn_input = torch.transpose(cnn_input, 1, 2)  # [batch_size, num_directions * hidden_size + embedding_size, seq_len]
+        maxpooling_outputs = []
+        for i, cnn in enumerate(self.cnns):
+            cnn_output = cnn(cnn_input)  # [batch_size, num_cnn_filters, seq_len - filter_size + 1]
+            cnn_output = self.bns[i](cnn_output)
+            cnn_output = self.relu(cnn_output)
+            maxpooling_output = self.maxpoolings[i](cnn_output)  # [batch_size, num_cnn_filters, 1]
+            maxpooling_outputs.append(maxpooling_output)
+        cat_pool = torch.cat(maxpooling_outputs, 2)  # [batch_size, num_filters, len(filter_sizes)]
+        reshape = torch.reshape(cat_pool, [-1, self.num_cnn_filters * len(
+            self.cnn_filter_sizes)])  # [batch_size, num_filters * len(filter_sizes)]
+        hidden = self.linear(reshape)  # [batch_size, output_size]
+        return hidden
 
 class BertForSequenceScoreTag(BertPreTrainedModel):
     def __init__(self, config, tag_config=None):
@@ -1174,7 +1298,7 @@ class BertForSequenceClassification(BertPreTrainedModel):
     input_mask = torch.LongTensor([[1, 1, 1], [1, 1, 0]])
     token_type_ids = torch.LongTensor([[0, 0, 1], [0, 1, 0]])
 
-    config = BertConfig(vocab_size_or_config_json_file=32000, hidden_size=768,
+    config = BertConfig(vocab_size_or_json_file=32000, hidden_size=768,
         num_hidden_layers=12, num_attention_heads=12, intermediate_size=3072)
 
     num_labels = 2
