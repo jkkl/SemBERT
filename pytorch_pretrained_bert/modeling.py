@@ -1083,6 +1083,7 @@ class RcnnForSequenceClassificationTag(nn.Module):
     def forward(self, input_ids, criterion=None, target_encoder_hidden=None, target_logits=None, input_tag_ids=None, 
                 labels=None, no_cuda=False,predict=False):
         criterion = nn.MSELoss()
+        batch_size, seq_len = input_ids.shape
         encoder_output = sequence_output = self.rcnn(input_ids)
         if not predict and target_encoder_hidden != None:
             if len(target_encoder_hidden.shape) > 2:
@@ -1091,6 +1092,10 @@ class RcnnForSequenceClassificationTag(nn.Module):
         batch_size, _ = sequence_output.size()
         
         max_seq_len = -1 # the real length of inuput filted padding
+        for index in range(batch_size):
+            real_seq_len = (input_ids[index]==1).nonzero()[0]
+            if real_seq_len > max_seq_len:
+                max_seq_len = real_seq_len
 
         num_aspect = input_tag_ids.size(1)
         input_tag_ids = input_tag_ids[:,:,:max_seq_len]
