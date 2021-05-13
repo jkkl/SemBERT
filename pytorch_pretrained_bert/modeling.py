@@ -1121,9 +1121,14 @@ class RcnnForSequenceClassificationTag(nn.Module):
         pooled_output = self.activation(pooled_output)
         pooled_output = self.dropout(pooled_output)
         logits = self.classifier(pooled_output)
+        # 拟合softmax之前的logits
+        # loss += criterion(logits, target_logits)
 
-        loss += criterion(logits, target_logits)
-
+        # 拟合softmax之后的predict
+        predict = F.softmax(logits, dim=1)
+        target_logits = torch.squeeze(target_logits)
+        target_predict = F.softmax(target_logits, dim=1)
+        loss += criterion(predict, target_predict)
         # if labels is not None:
             # loss_fct = CrossEntropyLoss()
             # loss = loss_fct(logits.view(-1, self.num_labels), labels.view(-1))

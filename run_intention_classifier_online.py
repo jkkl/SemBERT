@@ -237,7 +237,7 @@ class SoftLabelProcessor(DataProcessor):
   def get_train_examples(self, data_dir):
     """See base class."""
     return self._create_examples(
-        self._read_tsv(os.path.join(data_dir, "train.tsv_tag.soft_label.txt.head")), "train")
+        self._read_tsv(os.path.join(data_dir, "train.tsv_tag.soft_label.txt")), "train")
 
   def get_dev_examples(self, data_dir):
     """See base class."""
@@ -276,11 +276,12 @@ class SoftLabelProcessor(DataProcessor):
           print("bad data {}".format(line))
           continue
       guid = "%s-%s" % (set_type, i)
-      query = line[0]
-      text_a = line[1]
-      logits = json.loads(line[2])
-      bert_hidden = json.loads(line[3])
-      label = '1' # train student not use label
+      label = str(json.loads(line[0])[0])
+      query = line[1]
+      text_a = line[2]
+      predict = json.loads(line[3])
+      logits = json.loads(line[4])
+      bert_hidden = json.loads(line[5])
       examples.append(
           InputSoftLabelExample(guid=guid, query=query, text_a=text_a, logits=logits, bert_hidden=bert_hidden, label=label))
     return examples
@@ -775,7 +776,7 @@ def main():
     model = RcnnForSequenceClassificationTag(tag_config=tag_config)
     # if args.fp16:
     #     model.half()
-    # model.to(device)
+    model.to(device)
     # if args.local_rank != -1:
     #     try:
     #         from apex.parallel import DistributedDataParallel as DDP
@@ -860,6 +861,7 @@ def main():
             eval_sampler = SequentialSampler(eval_data)
             eval_dataloader = DataLoader(eval_data, sampler=eval_sampler, batch_size=args.eval_batch_size)
 
+        best_test_result = 0.0
         for epoch in trange(int(args.num_train_epochs), desc="Epoch"):
             model.train()
             tr_loss = 0
@@ -896,9 +898,9 @@ def main():
             if args.do_train:
                 torch.save(model_to_save.state_dict(), output_model_file)
             if args.do_eval and (args.local_rank == -1 or torch.distributed.get_rank() == 0):
-                model_state_dict = torch.load(output_model_file)
+                # model_state_dict = torch.load(output_model_file)
                 predict_model = RcnnForSequenceClassificationTag(tag_config=tag_config) 
-                predict_model = predict_model.load_state_dict(torch.load(output_model_file, map_location=torch.device('cpu'))['net'])
+                predict_model.load_state_dict(torch.load(output_model_file, map_location=torch.device(device)))
                 predict_model.to(device)
                 predict_model.eval()
                 eval_loss, eval_accuracy = 0, 0
@@ -910,14 +912,13 @@ def main():
                 with open(output_logits_file, "w") as writer:
                     writer.write(
                         "index" + "\t" + "\t".join(["logits " + str(i) for i in range(len(label_list))]) + "\n")
-                    for input_ids, input_mask, segment_ids, start_end_idx, input_tag_ids, label_ids in tqdm(
+                    for input_ids, target_logits, target_encoder_hidden, input_tag_ids, label_ids in tqdm(
                             eval_dataloader, desc="Evaluating"):
                         input_ids = input_ids.to(device)
-                        input_mask = input_mask.to(device)
-                        segment_ids = segment_ids.to(device)
-                        label_ids = label_ids.to(device)
-                        start_end_idx = start_end_idx.to(device)
+                        target_logits = target_logits.to(device)
+                        target_encoder_hidden = target_encoder_hidden.to(device)
                         input_tag_ids = input_tag_ids.to(device)
+                        label_ids = label_ids.to(device)
                         with torch.no_grad():
                             tmp_eval_loss, logits = predict_model(input_ids, target_encoder_hidden=target_encoder_hidden, target_logits=target_logits, input_tag_ids=input_tag_ids, labels=label_ids)
                             # logits = predict_model(input_ids, target_encoder_hidden=target_encoder_hidden, target_logits=target_logits, input_tag_ids=input_tag_ids, labels=label_ids)
@@ -955,25 +956,6 @@ def main():
                           'eval_accuracy': eval_accuracy,
                           'global_step': global_step,
                           'loss': loss}
-                if task_name == "cola":
-                    eval_mcc =  mcc(total_pred, total_labels)
-                    result["eval_mcc"] = eval_mcc
-                elif task_name == "mrpc" or task_name == "qqp":  # need F1 score
-                    if total_TP + total_FP == 0:
-                        P = 0
-                    else:
-                        P = total_TP / (total_TP + total_FP)
-                    if total_TP + total_FN == 0:
-                        R = 0
-                    else:
-                        R = total_TP / (total_TP + total_FN)
-                    if P + R ==0:
-                        F1 = 0
-                    else:
-                        F1 = 2.00 * P * R /(P + R)
-                    result["Precision"] = P
-                    result["Recall"] = R
-                    result["F1 score"] = F1
                 output_eval_file = os.path.join(args.output_dir, "eval_results.txt")
                 with open(output_eval_file, "a") as writer:
                     logger.info("***** Eval results *****")
@@ -982,12 +964,92 @@ def main():
                         writer.write("Epoch: %s, %s = %s\n" % (str(epoch), key, str(result[key])))
             logger.info("best epoch: %s, result:  %s", str(best_epoch), str(best_result))
 
+            if args.do_test:
+                #for epoch in ["1"]:
+                # for epoch in trange(int(args.num_train_epochs), desc="Epoch"):
+                test_examples = processor.get_test_examples(args.data_dir)
+                test_features = convert_soft_label_examples_to_features(
+                    test_examples, label_list, args.max_seq_length, tokenizer, srl_predictor=srl_predictor)
+                test_features = transform_tag_features(args.max_num_aspect, test_features, tag_tokenizer,
+                                                    args.max_seq_length)
+
+                logger.info("***** Running test *****")
+                logger.info("  Num examples = %d", len(test_examples))
+                logger.info("  Batch size = %d", args.eval_batch_size)
+                all_input_ids = torch.tensor([f.input_ids for f in test_features], dtype=torch.long)
+                all_target_logits = torch.tensor([f.target_logits for f in test_features], dtype=torch.float)
+                all_target_encoder_hidden  = torch.tensor([f.target_encoder_hidden for f in test_features], dtype=torch.float)
+                all_label_ids = torch.tensor([f.label_id for f in test_features], dtype=torch.long)
+                all_input_tag_ids = torch.tensor([f.input_tag_ids for f in test_features], dtype=torch.long)
+                # tensor 数据类型没有string， 故将源query存成list，自己控制batch，用于输出测评文件
+                all_text_a = [f.text_a for f in test_features]
+                test_data = TensorDataset(all_input_ids, all_target_logits, all_target_encoder_hidden, all_input_tag_ids, all_label_ids)
+                # Run prediction for full data
+                test_sampler = SequentialSampler(test_data)
+                test_dataloader = DataLoader(test_data, sampler=test_sampler, batch_size=args.eval_batch_size)
+
+                # epoch = 1
+                # output_model_file = os.path.join(args.output_dir, str(epoch) + "_pytorch_model.bin")
+                # model_state_dict = torch.load(output_model_file)
+                predict_model = RcnnForSequenceClassificationTag(tag_config=tag_config) 
+                predict_model.load_state_dict(torch.load(output_model_file, map_location=torch.device(device)))
+                predict_model.to(device)
+                predict_model.eval()
+                eval_loss, eval_accuracy = 0, 0
+                nb_eval_steps, nb_eval_examples = 0, 0
+                total_TP, total_FP, total_FN, total_TN = 0, 0, 0, 0
+                predict_label_all = []
+                predict_score_all = []
+                for input_ids, target_logits, target_encoder_hidden, input_tag_ids, label_ids in tqdm(
+                        test_dataloader, desc="Testing"):
+                    input_ids = input_ids.to(device)
+                    target_logits = target_logits.to(device)
+                    target_encoder_hidden = target_encoder_hidden.to(device)
+                    input_tag_ids = input_tag_ids.to(device)
+                    label_ids = label_ids.to(device)
+                    input_tag_ids = input_tag_ids.to(device)
+                    with torch.no_grad():
+                        tmp_eval_loss, logits = predict_model(input_ids, target_encoder_hidden=target_encoder_hidden, \
+                        target_logits=target_logits, input_tag_ids=input_tag_ids, labels=label_ids, no_cuda=n_gpu < 1)
+                    logits = logits.detach().cpu().numpy()
+                    label_ids = label_ids.to('cpu').numpy()
+                    tmp_eval_accuracy = accuracy(logits, label_ids)
+                    batch_predict_label = np.argmax(logits, axis=1)
+                    batch_predict_score = np.max(logits, axis=1)
+                    predict_label_all.extend(batch_predict_label)
+                    predict_score_all.extend(batch_predict_score)
+                    eval_loss += tmp_eval_loss.mean().item()
+                    eval_accuracy += tmp_eval_accuracy
+
+                    nb_eval_examples += input_ids.size(0)
+                    nb_eval_steps += 1
+
+                eval_loss = eval_loss / nb_eval_steps
+                eval_accuracy = eval_accuracy / nb_eval_examples
+                if eval_accuracy > best_test_result:
+                    best_epoch = epoch
+                    best_test_result = eval_accuracy
+                    output_eval_file = os.path.join(args.output_dir, "test_results.tsv")
+                    with open(output_eval_file, "w") as writer:
+                        for query, label, predict_label, predict_score in zip(all_text_a, all_label_ids, predict_label_all, predict_score_all):
+                            writer.write("{}\t{}\t{}\t{}\n".format(query, label, predict_label, predict_score))
+                    
+                    # save predict test file
+                loss = tr_loss / nb_tr_steps if args.do_train else None
+                result = {'test_loss': eval_loss,
+                        'test_accuracy': eval_accuracy,
+                        'global_step': global_step,
+                        'loss': loss}
+                logger.info("current epoch: %s, result:  %s", str(epoch), str(eval_accuracy))
+                logger.info("best epoch: %s, result:  %s", str(best_epoch), str(best_test_result))
+                del predict_model
+
     if args.do_test:
         best_result = 0.0
         #for epoch in ["1"]:
         for epoch in trange(int(args.num_train_epochs), desc="Epoch"):
             test_examples = processor.get_test_examples(args.data_dir)
-            test_features = convert_examples_to_features(
+            test_features = convert_soft_label_examples_to_features(
                 test_examples, label_list, args.max_seq_length, tokenizer, srl_predictor=srl_predictor)
             test_features = transform_tag_features(args.max_num_aspect, test_features, tag_tokenizer,
                                                    args.max_seq_length)
@@ -996,15 +1058,13 @@ def main():
             logger.info("  Num examples = %d", len(test_examples))
             logger.info("  Batch size = %d", args.eval_batch_size)
             all_input_ids = torch.tensor([f.input_ids for f in test_features], dtype=torch.long)
-            all_input_mask = torch.tensor([f.input_mask for f in test_features], dtype=torch.long)
-            all_segment_ids = torch.tensor([f.segment_ids for f in test_features], dtype=torch.long)
+            all_target_logits = torch.tensor([f.target_logits for f in test_features], dtype=torch.float)
+            all_target_encoder_hidden  = torch.tensor([f.target_encoder_hidden for f in test_features], dtype=torch.float)
             all_label_ids = torch.tensor([f.label_id for f in test_features], dtype=torch.long)
-            all_start_end_idx = torch.tensor([f.orig_to_token_split_idx for f in test_features], dtype=torch.long)
             all_input_tag_ids = torch.tensor([f.input_tag_ids for f in test_features], dtype=torch.long)
             # tensor 数据类型没有string， 故将源query存成list，自己控制batch，用于输出测评文件
             all_text_a = [f.text_a for f in test_features]
-            test_data = TensorDataset(all_input_ids, all_input_mask, all_segment_ids, all_start_end_idx,
-                                      all_input_tag_ids, all_label_ids)
+            test_data = TensorDataset(all_input_ids, all_target_logits, all_target_encoder_hidden, all_input_tag_ids, all_label_ids)
             # Run prediction for full data
             test_sampler = SequentialSampler(test_data)
             test_dataloader = DataLoader(test_data, sampler=test_sampler, batch_size=args.eval_batch_size)
@@ -1012,10 +1072,9 @@ def main():
             # epoch = 1
             output_model_file = os.path.join(args.output_dir, str(epoch) + "_pytorch_model.bin")
             model_state_dict = torch.load(output_model_file)
-            predict_model = BertForSequenceClassificationTag.from_pretrained(args.bert_model,
-                                                                             state_dict=model_state_dict,
-                                                                             num_labels=num_labels,
-                                                                             tag_config=tag_config)
+            predict_model = RcnnForSequenceClassificationTag(tag_config=tag_config) 
+
+            predict_model.load_state_dict(torch.load(output_model_file, map_location=torch.device(device)))
             predict_model.to(device)
             predict_model.eval()
             eval_loss, eval_accuracy = 0, 0
@@ -1023,19 +1082,17 @@ def main():
             total_TP, total_FP, total_FN, total_TN = 0, 0, 0, 0
             predict_label_all = []
             predict_score_all = []
-            for input_ids, input_mask, segment_ids, start_end_idx, input_tag_ids, label_ids in tqdm(
+            for input_ids, target_logits, target_encoder_hidden, input_tag_ids, label_ids in tqdm(
                     test_dataloader, desc="Testing"):
                 input_ids = input_ids.to(device)
-                input_mask = input_mask.to(device)
-                segment_ids = segment_ids.to(device)
+                target_logits = target_logits.to(device)
+                target_encoder_hidden = target_encoder_hidden.to(device)
+                input_tag_ids = input_tag_ids.to(device)
                 label_ids = label_ids.to(device)
-                start_end_idx = start_end_idx.to(device)
                 input_tag_ids = input_tag_ids.to(device)
                 with torch.no_grad():
-                    tmp_eval_loss = predict_model(input_ids, segment_ids, input_mask, start_end_idx, input_tag_ids,
-                                                  label_ids, n_gpu < 1)
-                    logits = predict_model(input_ids, segment_ids, input_mask, start_end_idx, input_tag_ids,
-                                           None)
+                    tmp_eval_loss, logits = predict_model(input_ids, target_encoder_hidden=target_encoder_hidden, \
+                    target_logits=target_logits, input_tag_ids=input_tag_ids, labels=label_ids, no_cuda=n_gpu < 1)
                 logits = logits.detach().cpu().numpy()
                 label_ids = label_ids.to('cpu').numpy()
                 tmp_eval_accuracy = accuracy(logits, label_ids)
@@ -1043,7 +1100,6 @@ def main():
                 batch_predict_score = np.max(logits, axis=1)
                 predict_label_all.extend(batch_predict_label)
                 predict_score_all.extend(batch_predict_score)
-
                 eval_loss += tmp_eval_loss.mean().item()
                 eval_accuracy += tmp_eval_accuracy
 
