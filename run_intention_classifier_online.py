@@ -15,6 +15,7 @@ import torch
 import pickle
 import json
 import codecs
+import torch.optim as optim
 from torch.utils.data import (DataLoader, RandomSampler, SequentialSampler,
                               TensorDataset)
 from torch.utils.data.distributed import DistributedSampler
@@ -179,6 +180,22 @@ class IntentionProcessor(DataProcessor):
         tag = hanlpSRLPredictor.predict(query)
         tag = json.dumps(tag, ensure_ascii=False)
     label = "1"
+    sample_id = 0
+    input_format = "{}\t{}\t{}\t{}\n".format(sample_id, query, tag, label)
+    input_format_list = input_format.strip().split('\t')
+
+    return self._create_examples(
+        [input_format_list], "test")
+
+  def get_examples_for_soft_label(self, query, tag=None, label=None):
+    """TODO bug See base class."""
+    if not tag:
+        from data_process.data_proc import hanlpSRLPredictor
+        tag = hanlpSRLPredictor.predict(query)
+        tag = json.dumps(tag, ensure_ascii=False)
+    if not label:
+        label = "1"
+
     sample_id = 0
     input_format = "{}\t{}\t{}\t{}\n".format(sample_id, query, tag, label)
     input_format_list = input_format.strip().split('\t')
@@ -502,7 +519,8 @@ def transform_tag_features(max_num_aspect, features, tag_tokenizer, max_seq_leng
                 input_tag_ids.append(input_tag_id)
         else:
             for idx, query_tag_ids in enumerate(tag_ids_list_a):
-                query_tag_ids = [1] + query_tag_ids[:len_seq_a - 2] + [2] #CLS and SEP
+                # query_tag_ids = [1] + query_tag_ids[:len_seq_a - 2] + [2] #CLS and SEP
+                query_tag_ids = [1] + query_tag_ids + [2] #CLS and SEP 
                 input_tag_id = query_tag_ids
                 while len(input_tag_id) < max_seq_length:
                     input_tag_id.append(0)
@@ -755,48 +773,49 @@ def main():
     # Prepare model
     cache_dir = args.cache_dir if args.cache_dir else os.path.join(PYTORCH_PRETRAINED_BERT_CACHE, 'distributed_{}'.format(args.local_rank))
     model = RcnnForSequenceClassificationTag(tag_config=tag_config)
-    if args.fp16:
-        model.half()
-    model.to(device)
-    if args.local_rank != -1:
-        try:
-            from apex.parallel import DistributedDataParallel as DDP
-        except ImportError:
-            raise ImportError("Please install apex from https://www.github.com/nvidia/apex to use distributed and fp16 training.")
+    # if args.fp16:
+    #     model.half()
+    # model.to(device)
+    # if args.local_rank != -1:
+    #     try:
+    #         from apex.parallel import DistributedDataParallel as DDP
+    #     except ImportError:
+    #         raise ImportError("Please install apex from https://www.github.com/nvidia/apex to use distributed and fp16 training.")
 
-        model = DDP(model)
-    elif n_gpu > 1:
-        model = torch.nn.DataParallel(model)
+    #     model = DDP(model)
+    # elif n_gpu > 1:
+    #     model = torch.nn.DataParallel(model)
 
     # Prepare optimizer
-    param_optimizer = list(model.named_parameters())
-    no_decay = ['bias', 'LayerNorm.bias', 'LayerNorm.weight']
-    optimizer_grouped_parameters = [
-        {'params': [p for n, p in param_optimizer if not any(nd in n for nd in no_decay)], 'weight_decay': 0.01},
-        {'params': [p for n, p in param_optimizer if any(nd in n for nd in no_decay)], 'weight_decay': 0.0}
-        ]
-    if args.fp16:
-        try:
-            from apex.optimizers import FP16_Optimizer
-            from apex.optimizers import FusedAdam
-        except ImportError:
-            raise ImportError("Please install apex from https://www.github.com/nvidia/apex to use distributed and fp16 training.")
+    # param_optimizer = list(model.named_parameters())
+    # no_decay = ['bias', 'LayerNorm.bias', 'LayerNorm.weight']
+    # optimizer_grouped_parameters = [
+    #     {'params': [p for n, p in param_optimizer if not any(nd in n for nd in no_decay)], 'weight_decay': 0.01},
+    #     {'params': [p for n, p in param_optimizer if any(nd in n for nd in no_decay)], 'weight_decay': 0.0}
+    #     ]
+    # if args.fp16:
+    #     try:
+    #         from apex.optimizers import FP16_Optimizer
+    #         from apex.optimizers import FusedAdam
+    #     except ImportError:
+    #         raise ImportError("Please install apex from https://www.github.com/nvidia/apex to use distributed and fp16 training.")
 
-        optimizer = FusedAdam(optimizer_grouped_parameters,
-                              lr=args.learning_rate,
-                              bias_correction=False,
-                              max_grad_norm=1.0)
-        if args.loss_scale == 0:
-            optimizer = FP16_Optimizer(optimizer, dynamic_loss_scale=True)
-        else:
-            optimizer = FP16_Optimizer(optimizer, static_loss_scale=args.loss_scale)
+    #     optimizer = FusedAdam(optimizer_grouped_parameters,
+    #                           lr=args.learning_rate,
+    #                           bias_correction=False,
+    #                           max_grad_norm=1.0)
+    #     if args.loss_scale == 0:
+    #         optimizer = FP16_Optimizer(optimizer, dynamic_loss_scale=True)
+    #     else:
+    #         optimizer = FP16_Optimizer(optimizer, static_loss_scale=args.loss_scale)
 
-    else:
-        optimizer = BertAdam(optimizer_grouped_parameters,
-                             lr=args.learning_rate,
-                             warmup=args.warmup_proportion,
-                             t_total=num_train_optimization_steps)
+    # else:
+    #     optimizer = BertAdam(optimizer_grouped_parameters,
+    #                          lr=args.learning_rate,
+    #                          warmup=args.warmup_proportion,
+    #                          t_total=num_train_optimization_steps)
 
+    optimizer = optim.Adam(model.parameters(), lr=1e-4)
     global_step = 0
     nb_tr_steps = 0
     tr_loss = 0
@@ -849,6 +868,7 @@ def main():
                 batch = tuple(t.to(device) for t in batch)
                 input_ids, target_logits, target_encoder_hidden, input_tag_ids, label_ids = batch
                 loss, logits = model(input_ids, target_encoder_hidden=target_encoder_hidden, target_logits=target_logits, input_tag_ids=input_tag_ids, labels=label_ids)
+                print('step:{}, loss:{}'.format(step, loss))
                 if n_gpu > 1:
                     loss = loss.mean() # mean() to average on multi-gpu.
                 if args.gradient_accumulation_steps > 1:
@@ -862,14 +882,14 @@ def main():
                 tr_loss += loss.item()
                 nb_tr_examples += input_ids.size(0)
                 nb_tr_steps += 1
-                if (step + 1) % args.gradient_accumulation_steps == 0:
-                    # modify learning rate with special warm up BERT uses
-                    lr_this_step = args.learning_rate * warmup_linear(global_step/num_train_optimization_steps, args.warmup_proportion)
-                    for param_group in optimizer.param_groups:
-                        param_group['lr'] = lr_this_step
-                    optimizer.step()
-                    optimizer.zero_grad()
-                    global_step += 1
+                # if (step + 1) % args.gradient_accumulation_steps == 0:
+                #     # modify learning rate with special warm up BERT uses
+                #     lr_this_step = args.learning_rate * warmup_linear(global_step/num_train_optimization_steps, args.warmup_proportion)
+                #     for param_group in optimizer.param_groups:
+                #         param_group['lr'] = lr_this_step
+                optimizer.step()
+                optimizer.zero_grad()
+                global_step += 1
             # Save a trained model
             model_to_save = model.module if hasattr(model, 'module') else model  # Only save the model it-self
             output_model_file = os.path.join(args.output_dir, str(epoch)+"_pytorch_model.bin")
@@ -1138,15 +1158,17 @@ def main():
         examples= IntentionProcessor._read_tsv(soft_label_inuput_file)
         soft_label_datas = []
         for example in examples:
-            if len(example) > 2: # 已包含tag的样本 id\tquery\ttag\tlabel
+            if len(example) > 3: # 已包含tag的样本 id\tquery\ttag\tlabel
                 query = example[1]
                 tag = example[2]
+                label = example[3]
             else:
                 query = example[0]
                 tag = None
+                label = None
             print("input query: {}".format(query))
             time_start = datetime.datetime.now()
-            eval_examples = processor.get_test_examples_online(query.strip(), tag)
+            eval_examples = processor.get_examples_for_soft_label(query.strip(), tag, label)
             time_srl = datetime.datetime.now()
             # print("time cost srl: {}".format((time_srl-time_start).microseconds/1000))
             eval_features = convert_examples_to_features(
@@ -1157,12 +1179,14 @@ def main():
             all_segment_ids = torch.tensor([f.segment_ids for f in eval_features], dtype=torch.long)
             all_start_end_idx = torch.tensor([f.orig_to_token_split_idx for f in eval_features], dtype=torch.long)
             all_input_tag_ids = torch.tensor([f.input_tag_ids for f in eval_features], dtype=torch.long)
+            all_label_ids = torch.tensor([f.label_id for f in eval_features], dtype=torch.long)
+
             eval_data = TensorDataset(all_input_ids, all_input_mask, all_segment_ids, all_start_end_idx,
-                                    all_input_tag_ids)
+                                    all_input_tag_ids, all_label_ids)
             # Run prediction for full data
             eval_sampler = SequentialSampler(eval_data)
             eval_dataloader = DataLoader(eval_data, sampler=eval_sampler, batch_size=args.eval_batch_size)
-            for input_ids, input_mask, segment_ids, start_end_idx, input_tag_ids in eval_dataloader:
+            for input_ids, input_mask, segment_ids, start_end_idx, input_tag_ids, label_ids in eval_dataloader:
                 input_ids = input_ids.to(device)
                 input_mask = input_mask.to(device)
                 segment_ids = segment_ids.to(device)
@@ -1171,11 +1195,13 @@ def main():
                 time_get_feature = datetime.datetime.now()
                 print("time cost feature: {}".format((time_get_feature-time_srl).microseconds/1000))
                 with torch.no_grad():
-                    logits, bert_hidden, tag_hidden = predict_model(input_ids, segment_ids, input_mask, start_end_idx, input_tag_ids, None, no_cuda=n_gpu < 1)
+                    logits, predict, bert_hidden, tag_hidden = predict_model(input_ids, segment_ids, input_mask, start_end_idx, input_tag_ids, None, no_cuda=n_gpu < 1)
                     logits = json.dumps(logits.detach().cpu().numpy().tolist())
+                    predict = json.dumps(predict.detach().cpu().numpy().tolist())
                     bert_hidden = json.dumps(bert_hidden.detach().cpu().numpy().tolist())
                     tag_hidden = json.dumps(tag_hidden.detach().cpu().numpy().tolist())
-                    output_line = "\t".join([query, eval_examples[0].text_a, logits, bert_hidden, tag_hidden])
+                    label_id = json.dumps(label_ids.detach().cpu().tolist())
+                    output_line = "\t".join([label_id, query, eval_examples[0].text_a, predict, logits, bert_hidden, tag_hidden])
                     fw.write(output_line + "\n")
         fw.close()
 

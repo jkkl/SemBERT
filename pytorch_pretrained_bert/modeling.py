@@ -1036,7 +1036,8 @@ class BertForSequenceClassificationTag(BertPreTrainedModel):
             # 输出bert cls，用于student 拟合
             bert_hidden = bert_output[:, 0]
             tag_hidden = tag_output[:,0]
-            return logits, bert_hidden, tag_hidden
+            predict = F.softmax(logits, dim=1)
+            return logits, predict, bert_hidden, tag_hidden
 
 
 class RcnnForSequenceClassificationTag(nn.Module):
@@ -1073,8 +1074,8 @@ class RcnnForSequenceClassificationTag(nn.Module):
             hidden_size = hidden_size
         use_tag = True
         if use_tag:
-            self.pool = nn.Linear(hidden_size + tag_config.hidden_size, hidden_size + tag_config.hidden_size)
-            self.classifier = nn.Linear(hidden_size + tag_config.hidden_size, num_labels)
+            self.pool = nn.Linear(hidden_size, hidden_size)
+            self.classifier = nn.Linear(hidden_size, num_labels)
         else:
             self.pool = nn.Linear(hidden_size, hidden_size)
             self.classifier = nn.Linear(hidden_size, num_labels)
@@ -1093,7 +1094,12 @@ class RcnnForSequenceClassificationTag(nn.Module):
         
         max_seq_len = -1 # the real length of inuput filted padding
         for index in range(batch_size):
-            real_seq_len = (input_ids[index]==1).nonzero()[0]
+            eq_1 = (input_ids[index]==1).nonzero()
+            if len(eq_1) < 1:
+                # 没有padding
+                real_seq_len = seq_len
+            else:
+                real_seq_len = (input_ids[index]==1).nonzero()[0]
             if real_seq_len > max_seq_len:
                 max_seq_len = real_seq_len
 
@@ -1106,10 +1112,11 @@ class RcnnForSequenceClassificationTag(nn.Module):
         tag_output = tag_output.transpose(1, 2).contiguous().view(batch_size,
                                                                     max_seq_len, -1)
         tag_output = self.dense(tag_output)
+        tag_output = tag_output[:,0]
         # ? cnn完，tag linear完，还用cls？ tag 做了线性变换后，也是用cls，这样靠谱吗？
-        sequence_output = torch.cat((sequence_output, tag_output), 2)
+        sequence_output = torch.cat((sequence_output, tag_output), 1)
 
-        first_token_tensor = sequence_output[:, 0]
+        first_token_tensor = sequence_output
         pooled_output = self.pool(first_token_tensor)
         pooled_output = self.activation(pooled_output)
         pooled_output = self.dropout(pooled_output)
