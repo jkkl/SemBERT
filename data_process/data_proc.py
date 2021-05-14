@@ -174,13 +174,17 @@ def get_srl_label_multi_data(data_dir, task_name=None):
 
 if __name__ == '__main__':
     # srl_file = './data/intention2_v2/test.tsv_tag'
-    srl_file_multi_data_dir = './data/Intention170_binary'
-    task_name = "General_Intention_170_V1_binary"
-    time_start = get_time_stamp()
-    count = get_srl_label_multi_data(srl_file_multi_data_dir, task_name)
-    time_end = get_time_stamp()
-    time_cost = (time_end - time_start).seconds
-    time_cost_per = 1.0*time_cost/count
-    print("time_cost_total:{}, time_cost_one:{}".format(time_cost, time_cost_per))
+    # srl_file_multi_data_dir = './data/Intention170_binary'
+    # task_name = "General_Intention_170_V1_binary"
+    # time_start = get_time_stamp()
+    # count = get_srl_label_multi_data(srl_file_multi_data_dir, task_name)
+    # time_end = get_time_stamp()
+    # time_cost = (time_end - time_start).seconds
+    # time_cost_per = 1.0*time_cost/count
+    # print("time_cost_total:{}, time_cost_one:{}".format(time_cost, time_cost_per))
+
+    input_file = './data/intention2_v2/no_label_data.txt'
+    output_file = './data/intention2_v2/no_label_data.txt.tsv_tag'
+    data_format(input_file, output_file)
     
     # srl_data_analyze(srl_file)

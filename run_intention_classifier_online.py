@@ -683,6 +683,8 @@ def main():
     parser.add_argument('--server_port', type=str, default='', help="Can be used for distant debugging.")
     parser.add_argument('--best_epoch', type=int, help="the best epoch for predict")
     parser.add_argument('--soft_label_input_file', type=str, help="the input file of predict soft label for student distill")
+    parser.add_argument('--learn_type', type=str, help="the student model train type: soft_label or label")
+
     args = parser.parse_args()
 
     setting_logging(args.task_desc)
@@ -729,7 +731,7 @@ def main():
         raise ValueError("At least one of `do_train` or `do_eval` must be True.")
 
     if os.path.exists(args.output_dir) and os.listdir(args.output_dir) and args.do_train:
-        raise ValueError("Output directory ({}) already exists and is not empty.".format(args.output_dir))
+        print("Output directory ({}) already exists and is not empty.".format(args.output_dir))
     if not os.path.exists(args.output_dir):
         os.makedirs(args.output_dir)
 
@@ -788,12 +790,6 @@ def main():
     #     model = torch.nn.DataParallel(model)
 
     # Prepare optimizer
-    # param_optimizer = list(model.named_parameters())
-    # no_decay = ['bias', 'LayerNorm.bias', 'LayerNorm.weight']
-    # optimizer_grouped_parameters = [
-    #     {'params': [p for n, p in param_optimizer if not any(nd in n for nd in no_decay)], 'weight_decay': 0.01},
-    #     {'params': [p for n, p in param_optimizer if any(nd in n for nd in no_decay)], 'weight_decay': 0.0}
-    #     ]
     # if args.fp16:
     #     try:
     #         from apex.optimizers import FP16_Optimizer
@@ -811,18 +807,28 @@ def main():
     #         optimizer = FP16_Optimizer(optimizer, static_loss_scale=args.loss_scale)
 
     # else:
-    #     optimizer = BertAdam(optimizer_grouped_parameters,
-    #                          lr=args.learning_rate,
-    #                          warmup=args.warmup_proportion,
-    #                          t_total=num_train_optimization_steps)
+    # 在sem-rcnn 实验了效果不好，优化的很慢，走在局部最小值调不出来了。 
+    # param_optimizer = list(model.named_parameters())
+    # no_decay = ['bias', 'LayerNorm.bias', 'LayerNorm.weight']
+    # optimizer_grouped_parameters = [
+    #     {'params': [p for n, p in param_optimizer if not any(nd in n for nd in no_decay)], 'weight_decay': 0.01},
+    #     {'params': [p for n, p in param_optimizer if any(nd in n for nd in no_decay)], 'weight_decay': 0.0}
+    #     ]
+    # optimizer = BertAdam(optimizer_grouped_parameters,
+    #                         lr=args.learning_rate,
+    #                         warmup=args.warmup_proportion,
+    #                         t_total=num_train_optimization_steps)
 
-    optimizer = optim.Adam(model.parameters(), lr=1e-4)
+    optimizer = optim.AdamW(model.parameters(), lr=1e-4)
     global_step = 0
     nb_tr_steps = 0
     tr_loss = 0
     best_epoch = 0
     if args.do_train:
         best_result = 0.0
+        best_eval_result = 0.0
+        best_test_epoch = -1 
+        best_eval_epoch = -1
         train_features = transform_tag_features(args.max_num_aspect, train_features, tag_tokenizer, args.max_seq_length)
 
         logger.info("***** Running training *****")
@@ -862,15 +868,20 @@ def main():
             eval_dataloader = DataLoader(eval_data, sampler=eval_sampler, batch_size=args.eval_batch_size)
 
         best_test_result = 0.0
-        for epoch in trange(int(args.num_train_epochs), desc="Epoch"):
+        start_train_epoch = 0
+        if args.best_epoch:
+            output_model_file = os.path.join(args.output_dir, str(args.best_epoch)+"_pytorch_model.bin")
+            model.load_state_dict(torch.load(output_model_file, map_location=torch.device(device)))
+            model.to(device)
+            start_train_epoch = int(args.best_epoch) + 1
+        for epoch in trange(start_train_epoch, int(args.num_train_epochs), desc="Epoch"):
             model.train()
             tr_loss = 0
             nb_tr_examples, nb_tr_steps = 0, 0
             for step, batch in enumerate(tqdm(train_dataloader, desc="Iteration")):
                 batch = tuple(t.to(device) for t in batch)
                 input_ids, target_logits, target_encoder_hidden, input_tag_ids, label_ids = batch
-                loss, logits = model(input_ids, target_encoder_hidden=target_encoder_hidden, target_logits=target_logits, input_tag_ids=input_tag_ids, labels=label_ids)
-                print('step:{}, loss:{}'.format(step, loss))
+                loss, logits = model(input_ids, target_encoder_hidden=target_encoder_hidden, target_logits=target_logits, input_tag_ids=input_tag_ids, labels=label_ids, learn_type=args.learn_type)
                 if n_gpu > 1:
                     loss = loss.mean() # mean() to average on multi-gpu.
                 if args.gradient_accumulation_steps > 1:
@@ -920,7 +931,7 @@ def main():
                         input_tag_ids = input_tag_ids.to(device)
                         label_ids = label_ids.to(device)
                         with torch.no_grad():
-                            tmp_eval_loss, logits = predict_model(input_ids, target_encoder_hidden=target_encoder_hidden, target_logits=target_logits, input_tag_ids=input_tag_ids, labels=label_ids)
+                            tmp_eval_loss, logits = predict_model(input_ids, target_encoder_hidden=target_encoder_hidden, target_logits=target_logits, input_tag_ids=input_tag_ids, labels=label_ids, learn_type=args.learn_type)
                             # logits = predict_model(input_ids, target_encoder_hidden=target_encoder_hidden, target_logits=target_logits, input_tag_ids=input_tag_ids, labels=label_ids)
                         logits = logits.detach().cpu().numpy()
                         label_ids = label_ids.to('cpu').numpy()
@@ -933,24 +944,15 @@ def main():
                             # print(prediction)
                             writer.write(str(index) + "\t" + "\t".join([str(pred) for pred in prediction]) + "\n")
                             index += 1
-                        if task_name == "cola":
-                            total_pred.extend(np.argmax(logits, axis=1).squeeze().tolist())
-                            total_labels.extend(label_ids.squeeze().tolist())
-                        elif task_name == "mrpc" or task_name == "qqp":  # need F1 score
-                            TP, FP, FN, TN = Fscore(logits, label_ids)
-                            total_TP += TP
-                            total_FP += FP
-                            total_FN += FN
-                            total_TN += TN
                         nb_eval_examples += input_ids.size(0)
                         nb_eval_steps += 1
                 del predict_model
                 eval_loss = eval_loss / nb_eval_steps
                 eval_accuracy = eval_accuracy / nb_eval_examples
 
-                if eval_accuracy > best_result:
-                    best_epoch = epoch
-                    best_result = eval_accuracy
+                if eval_accuracy > best_eval_result:
+                    best_eval_epoch = epoch
+                    best_eval_result = eval_accuracy
                 loss = tr_loss / nb_tr_steps if args.do_train else None
                 result = {'eval_loss': eval_loss,
                           'eval_accuracy': eval_accuracy,
@@ -962,7 +964,7 @@ def main():
                     for key in sorted(result.keys()):
                         logger.info("Epoch: %s,  %s = %s", str(epoch), key, str(result[key]))
                         writer.write("Epoch: %s, %s = %s\n" % (str(epoch), key, str(result[key])))
-            logger.info("best epoch: %s, result:  %s", str(best_epoch), str(best_result))
+            logger.info("best epoch: %s, result:  %s", str(best_eval_epoch), str(best_eval_result))
 
             if args.do_test:
                 #for epoch in ["1"]:
@@ -1010,7 +1012,7 @@ def main():
                     input_tag_ids = input_tag_ids.to(device)
                     with torch.no_grad():
                         tmp_eval_loss, logits = predict_model(input_ids, target_encoder_hidden=target_encoder_hidden, \
-                        target_logits=target_logits, input_tag_ids=input_tag_ids, labels=label_ids, no_cuda=n_gpu < 1)
+                        target_logits=target_logits, input_tag_ids=input_tag_ids, labels=label_ids, no_cuda=n_gpu < 1, learn_type=args.learn_type)
                     logits = logits.detach().cpu().numpy()
                     label_ids = label_ids.to('cpu').numpy()
                     tmp_eval_accuracy = accuracy(logits, label_ids)
@@ -1027,7 +1029,7 @@ def main():
                 eval_loss = eval_loss / nb_eval_steps
                 eval_accuracy = eval_accuracy / nb_eval_examples
                 if eval_accuracy > best_test_result:
-                    best_epoch = epoch
+                    best_test_epoch = epoch
                     best_test_result = eval_accuracy
                     output_eval_file = os.path.join(args.output_dir, "test_results.tsv")
                     with open(output_eval_file, "w") as writer:
@@ -1041,7 +1043,7 @@ def main():
                         'global_step': global_step,
                         'loss': loss}
                 logger.info("current epoch: %s, result:  %s", str(epoch), str(eval_accuracy))
-                logger.info("best epoch: %s, result:  %s", str(best_epoch), str(best_test_result))
+                logger.info("best epoch: %s, result:  %s", str(best_test_epoch), str(best_test_result))
                 del predict_model
 
     if args.do_test:
@@ -1123,32 +1125,7 @@ def main():
                       'test_accuracy': eval_accuracy,
                       'global_step': global_step,
                       'loss': loss}
-            if task_name == "cola":
-                # TODO:  eval_mcc = mcc(total_pred, total_labels)
-                # result["eval_mcc"] = eval_mcc
-                pass
-            elif task_name == "mrpc" or task_name == "qqp":  # need F1 score
-                if total_TP + total_FP == 0:
-                    P = 0
-                else:
-                    P = total_TP / (total_TP + total_FP)
-                if total_TP + total_FN == 0:
-                    R = 0
-                else:
-                    R = total_TP / (total_TP + total_FN)
-                if P + R == 0:
-                    F1 = 0
-                else:
-                    F1 = 2.00 * P * R / (P + R)
-                result["Precision"] = P
-                result["Recall"] = R
-                result["F1 score"] = F1
-            # output_eval_file = os.path.join(args.output_dir, "dev_results.txt")
-            # with open(output_eval_file, "a") as writer:
-            #     logger.info("***** Eval results *****")
-            #     for key in sorted(result.keys()):
-            #         logger.info("Epoch: %s,  %s = %s", str(epoch), key, str(result[key]))
-            #         writer.write("Epoch: %s, %s = %s\n" % (str(epoch), key, str(result[key])))
+            
             logger.info("current epoch: %s, result:  %s", str(epoch), str(eval_accuracy))
             logger.info("best epoch: %s, result:  %s", str(best_epoch), str(best_result))
 

@@ -1061,8 +1061,8 @@ class RcnnForSequenceClassificationTag(nn.Module):
         char_embedding, pretrained_char_embeddings, embedding_size = load_embedding(r'./pre-trained-models/merge_sgns_char300.txt')
         self.rcnn = RNNCNNModule(pretrained_char_embeddings, seq_len=32, embedding_size=embedding_size, hidden_dim=768, cnn_filter_sizes=(2,3,4,5,6), num_cnn_filters=32)
         self.filter_size = 3
-        self.filter_size = 3
         # self.cnn = CNN_conv1d(config, filter_size=self.filter_size)
+        self.num_labels = num_labels
 
         self.activation = nn.Tanh()
         self.dropout = nn.Dropout(hidden_dropout_prob)
@@ -1082,16 +1082,10 @@ class RcnnForSequenceClassificationTag(nn.Module):
         # self.apply(self.init_bert_weights)
 
     def forward(self, input_ids, criterion=None, target_encoder_hidden=None, target_logits=None, input_tag_ids=None, 
-                labels=None, no_cuda=False,predict=False):
-        criterion = nn.MSELoss()
+                labels=None, no_cuda=False,mode_type=False, learn_type="soft_label"):
         batch_size, seq_len = input_ids.shape
         encoder_output = sequence_output = self.rcnn(input_ids)
-        if not predict and target_encoder_hidden != None:
-            if len(target_encoder_hidden.shape) > 2:
-                target_encoder_hidden = torch.squeeze(target_encoder_hidden)
-            loss = criterion(encoder_output, target_encoder_hidden)
         batch_size, _ = sequence_output.size()
-        
         max_seq_len = -1 # the real length of inuput filted padding
         for index in range(batch_size):
             eq_1 = (input_ids[index]==1).nonzero()
@@ -1121,19 +1115,23 @@ class RcnnForSequenceClassificationTag(nn.Module):
         pooled_output = self.activation(pooled_output)
         pooled_output = self.dropout(pooled_output)
         logits = self.classifier(pooled_output)
-        # 拟合softmax之前的logits
-        # loss += criterion(logits, target_logits)
 
-        # 拟合softmax之后的predict
-        predict = F.softmax(logits, dim=1)
-        target_logits = torch.squeeze(target_logits)
-        target_predict = F.softmax(target_logits, dim=1)
-        loss += criterion(predict, target_predict)
-        # if labels is not None:
-            # loss_fct = CrossEntropyLoss()
-            # loss = loss_fct(logits.view(-1, self.num_labels), labels.view(-1))
-            # return loss
-        # else:
+
+        if learn_type == "soft_label":
+            criterion = nn.MSELoss()
+            if target_encoder_hidden != None:
+                if len(target_encoder_hidden.shape) > 2:
+                    target_encoder_hidden = torch.squeeze(target_encoder_hidden, 1)
+                loss = criterion(encoder_output, target_encoder_hidden)
+            target_logits = torch.squeeze(target_logits, 1)
+            target_predict = F.softmax(target_logits, dim=1)
+            # 拟合softmax之后的predict
+            predict = F.softmax(logits, dim=1)
+            loss += criterion(predict, target_predict)
+        else:
+            criterion = CrossEntropyLoss()
+            loss = criterion(logits.view(-1, self.num_labels), labels.view(-1))
+
         return loss, logits
 
 
