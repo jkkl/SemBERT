@@ -1041,7 +1041,7 @@ class BertForSequenceClassificationTag(BertPreTrainedModel):
 
 
 class RcnnForSequenceClassificationTag(nn.Module):
-    def __init__(self, hidden_size=768, hidden_dropout_prob=0.1, num_labels=2, tag_config=None):
+    def __init__(self, hidden_size=768, hidden_dropout_prob=0.1, num_labels=2, tag_config=None, use_tag=True):
         super(RcnnForSequenceClassificationTag, self).__init__()
         def load_embedding(file):
             word_embedding = {}
@@ -1063,17 +1063,17 @@ class RcnnForSequenceClassificationTag(nn.Module):
         self.filter_size = 3
         # self.cnn = CNN_conv1d(config, filter_size=self.filter_size)
         self.num_labels = num_labels
-
+        self.use_tag = use_tag
         self.activation = nn.Tanh()
         self.dropout = nn.Dropout(hidden_dropout_prob)
-        if tag_config is not None:
+        if tag_config is not None and self.use_tag:
             hidden_size = hidden_size + tag_config.hidden_size
             self.tag_model = TagEmebedding(tag_config)
             self.dense = nn.Linear(tag_config.num_aspect * tag_config.hidden_size, tag_config.hidden_size)
         else:
             hidden_size = hidden_size
-        use_tag = True
-        if use_tag:
+        
+        if self.use_tag:
             self.pool = nn.Linear(hidden_size, hidden_size)
             self.classifier = nn.Linear(hidden_size, num_labels)
         else:
@@ -1086,29 +1086,30 @@ class RcnnForSequenceClassificationTag(nn.Module):
         batch_size, seq_len = input_ids.shape
         encoder_output = sequence_output = self.rcnn(input_ids)
         batch_size, _ = sequence_output.size()
-        max_seq_len = -1 # the real length of inuput filted padding
-        for index in range(batch_size):
-            eq_1 = (input_ids[index]==1).nonzero()
-            if len(eq_1) < 1:
-                # 没有padding
-                real_seq_len = seq_len
-            else:
-                real_seq_len = (input_ids[index]==1).nonzero()[0]
-            if real_seq_len > max_seq_len:
-                max_seq_len = real_seq_len
+        if self.use_tag:
+            max_seq_len = -1 # the real length of inuput filted padding
+            for index in range(batch_size):
+                eq_1 = (input_ids[index]==1).nonzero()
+                if len(eq_1) < 1:
+                    # 没有padding
+                    real_seq_len = seq_len
+                else:
+                    real_seq_len = (input_ids[index]==1).nonzero()[0]
+                if real_seq_len > max_seq_len:
+                    max_seq_len = real_seq_len
 
-        num_aspect = input_tag_ids.size(1)
-        input_tag_ids = input_tag_ids[:,:,:max_seq_len]
-        flat_input_tag_ids = input_tag_ids.view(-1, input_tag_ids.size(-1))
-        # print("flat_que_tag", flat_input_que_tag_ids.size())
-        tag_output = self.tag_model(flat_input_tag_ids, num_aspect)
-        # batch_size, que_len, num_aspect*tag_hidden_size
-        tag_output = tag_output.transpose(1, 2).contiguous().view(batch_size,
-                                                                    max_seq_len, -1)
-        tag_output = self.dense(tag_output)
-        tag_output = tag_output[:,0]
+            num_aspect = input_tag_ids.size(1)
+            input_tag_ids = input_tag_ids[:,:,:max_seq_len]
+            flat_input_tag_ids = input_tag_ids.view(-1, input_tag_ids.size(-1))
+            # print("flat_que_tag", flat_input_que_tag_ids.size())
+            tag_output = self.tag_model(flat_input_tag_ids, num_aspect)
+            # batch_size, que_len, num_aspect*tag_hidden_size
+            tag_output = tag_output.transpose(1, 2).contiguous().view(batch_size,
+                                                                        max_seq_len, -1)
+            tag_output = self.dense(tag_output)
+            tag_output = tag_output[:,0]
         # ? cnn完，tag linear完，还用cls？ tag 做了线性变换后，也是用cls，这样靠谱吗？
-        sequence_output = torch.cat((sequence_output, tag_output), 1)
+            sequence_output = torch.cat((sequence_output, tag_output), 1)
 
         first_token_tensor = sequence_output
         pooled_output = self.pool(first_token_tensor)

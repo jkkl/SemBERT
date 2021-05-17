@@ -143,9 +143,11 @@ class DataProcessor(object):
     def _read_tsv(cls, input_file, quotechar=None):
         """Reads a tab separated value file."""
         with open(input_file, "r", encoding='utf-8') as f:
-            reader = csv.reader(f, delimiter="\t", quotechar=quotechar)
+            # reader = csv.reader(f, delimiter="\t", quotechar="\"")
+            reader = f.readlines()
             lines = []
             for line in reader:
+                line = line.strip().split('\t')
                 if sys.version_info[0] == 2:
                     line = list(unicode(cell, 'utf-8') for cell in line)
                 lines.append(line)
@@ -684,6 +686,7 @@ def main():
     parser.add_argument('--best_epoch', type=int, help="the best epoch for predict")
     parser.add_argument('--soft_label_input_file', type=str, help="the input file of predict soft label for student distill")
     parser.add_argument('--learn_type', type=str, help="the student model train type: soft_label or label")
+    parser.add_argument('--use_tag', type=int, help="if use srl tag True or False")
 
     args = parser.parse_args()
 
@@ -775,7 +778,7 @@ def main():
                            num_aspect=args.max_num_aspect)
     # Prepare model
     cache_dir = args.cache_dir if args.cache_dir else os.path.join(PYTORCH_PRETRAINED_BERT_CACHE, 'distributed_{}'.format(args.local_rank))
-    model = RcnnForSequenceClassificationTag(tag_config=tag_config)
+    model = RcnnForSequenceClassificationTag(tag_config=tag_config, use_tag=args.use_tag)
     # if args.fp16:
     #     model.half()
     model.to(device)
@@ -910,7 +913,7 @@ def main():
                 torch.save(model_to_save.state_dict(), output_model_file)
             if args.do_eval and (args.local_rank == -1 or torch.distributed.get_rank() == 0):
                 # model_state_dict = torch.load(output_model_file)
-                predict_model = RcnnForSequenceClassificationTag(tag_config=tag_config) 
+                predict_model = RcnnForSequenceClassificationTag(tag_config=tag_config, use_tag=args.use_tag) 
                 predict_model.load_state_dict(torch.load(output_model_file, map_location=torch.device(device)))
                 predict_model.to(device)
                 predict_model.eval()
@@ -993,7 +996,7 @@ def main():
                 # epoch = 1
                 # output_model_file = os.path.join(args.output_dir, str(epoch) + "_pytorch_model.bin")
                 # model_state_dict = torch.load(output_model_file)
-                predict_model = RcnnForSequenceClassificationTag(tag_config=tag_config) 
+                predict_model = RcnnForSequenceClassificationTag(tag_config=tag_config, use_tag=args.use_tag) 
                 predict_model.load_state_dict(torch.load(output_model_file, map_location=torch.device(device)))
                 predict_model.to(device)
                 predict_model.eval()
@@ -1074,7 +1077,7 @@ def main():
             # epoch = 1
             output_model_file = os.path.join(args.output_dir, str(epoch) + "_pytorch_model.bin")
             model_state_dict = torch.load(output_model_file)
-            predict_model = RcnnForSequenceClassificationTag(tag_config=tag_config) 
+            predict_model = RcnnForSequenceClassificationTag(tag_config=tag_config, use_tag=args.use_tag) 
 
             predict_model.load_state_dict(torch.load(output_model_file, map_location=torch.device(device)))
             predict_model.to(device)
@@ -1170,7 +1173,7 @@ def main():
                     time_get_feature = datetime.datetime.now()
                     print("time cost feature: {}".format((time_get_feature-time_srl).microseconds/1000))
                     with torch.no_grad():
-                        logits, bert_hidden, tag_hidden = predict_model(input_ids, segment_ids, input_mask, start_end_idx, input_tag_ids, None, no_cuda=n_gpu < 1)
+                        logits, bert_hidden, tag_hidden, _ = predict_model(input_ids, segment_ids, input_mask, start_end_idx, input_tag_ids, None, no_cuda=n_gpu < 1)
                     logits = logits.detach().cpu().numpy()
                     for (i, prediction) in enumerate(logits):
                         predict_label = np.argmax(prediction)
